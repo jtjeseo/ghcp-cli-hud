@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_HOME:-$HOME/.copilot}/hooks/state-hook.sh\" sessionStart",
+        "powershell": "$copilotHome = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $env:USERPROFILE '.copilot' }; & (Join-Path $copilotHome 'hooks\\state-hook.ps1') -Event sessionStart",
+        "timeoutSec": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_HOME:-$HOME/.copilot}/hooks/state-hook.sh\" sessionEnd",
+        "powershell": "$copilotHome = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $env:USERPROFILE '.copilot' }; & (Join-Path $copilotHome 'hooks\\state-hook.ps1') -Event sessionEnd",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "matcher": "^(bash|powershell|create|edit|str_replace_editor|apply_patch|view|glob|grep|rg|web_fetch|web_search|task|ask_user|mcp__.+)$",
+        "bash": "bash \"${COPILOT_HOME:-$HOME/.copilot}/hooks/state-hook.sh\" preToolUse",
+        "powershell": "$copilotHome = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $env:USERPROFILE '.copilot' }; & (Join-Path $copilotHome 'hooks\\state-hook.ps1') -Event preToolUse",
+        "timeoutSec": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "matcher": "^(bash|powershell|create|edit|str_replace_editor|apply_patch|view|glob|grep|rg|web_fetch|web_search|task|ask_user|mcp__.+)$",
+        "bash": "bash \"${COPILOT_HOME:-$HOME/.copilot}/hooks/state-hook.sh\" postToolUse",
+        "powershell": "$copilotHome = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $env:USERPROFILE '.copilot' }; & (Join-Path $copilotHome 'hooks\\state-hook.ps1') -Event postToolUse",
+        "timeoutSec": 5
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_HOME:-$HOME/.copilot}/hooks/state-hook.sh\" postToolUseFailure",
+        "powershell": "$copilotHome = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $env:USERPROFILE '.copilot' }; & (Join-Path $copilotHome 'hooks\\state-hook.ps1') -Event postToolUseFailure",
+        "timeoutSec": 5
+      }
+    ],
+    "errorOccurred": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_HOME:-$HOME/.copilot}/hooks/state-hook.sh\" errorOccurred",
+        "powershell": "$copilotHome = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $env:USERPROFILE '.copilot' }; & (Join-Path $copilotHome 'hooks\\state-hook.ps1') -Event errorOccurred",
+        "timeoutSec": 5
+      }
+    ],
+    "subagentStart": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_HOME:-$HOME/.copilot}/hooks/state-hook.sh\" subagentStart",
+        "powershell": "$copilotHome = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $env:USERPROFILE '.copilot' }; & (Join-Path $copilotHome 'hooks\\state-hook.ps1') -Event subagentStart",
+        "timeoutSec": 5
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "command",
+        "bash": "bash \"${COPILOT_HOME:-$HOME/.copilot}/hooks/state-hook.sh\" subagentStop",
+        "powershell": "$copilotHome = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $env:USERPROFILE '.copilot' }; & (Join-Path $copilotHome 'hooks\\state-hook.ps1') -Event subagentStop",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

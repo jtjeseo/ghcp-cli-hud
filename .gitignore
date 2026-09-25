@@ -1,0 +1,9 @@
+settings.json
+settings.json.*
+config.json
+state/
+**/state/
+raw-*.json
+**/raw-*.json
+*.log
+Copilot-CLI-Backups/
