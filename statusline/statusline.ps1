@@ -642,6 +642,30 @@ function Get-AicSegment {
         -ValueColor $script:Colors.white)
 }
 
+function Get-RecentAicSegment {
+    param([AllowNull()][object]$SignalState)
+
+    if ($SignalState -isnot [System.Collections.IDictionary]) { return $null }
+    $delta = $SignalState['recentIncreaseNanoAiu']
+    $recordedAt = ConvertTo-NullableNumber -Value $SignalState['recentAtMs']
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ($delta -is [bool] -or $delta -isnot [ValueType] -or
+        $null -eq $recordedAt -or $delta -lt 0 -or
+        [double]$delta -gt 9007199254740991 -or
+        [double]$delta -ne [math]::Truncate([double]$delta) -or
+        $recordedAt -gt $now + 5000 -or $now - $recordedAt -gt 120000) {
+        return $null
+    }
+
+    $aiu = [double]$delta / 1000000000.0
+    $formatted = $aiu.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)
+    if ($aiu -gt 0 -and $formatted -eq '0.00') {
+        $formatted = $aiu.ToString('0.#########', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    return (Format-LabeledValue -Label 'recent' -Value ('+' + $formatted + ' AIU') `
+        -ValueColor $script:Colors.green)
+}
+
 function Get-PremiumRequestsSegment {
     param([object]$Payload)
 
@@ -711,6 +735,159 @@ function Get-SessionState {
         return $null
     }
     return $null
+}
+
+function Test-HudSignalInteger {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value -or $Value -is [bool] -or $Value -isnot [ValueType]) {
+        return $false
+    }
+    $number = ConvertTo-NullableNumber -Value $Value
+    return $null -ne $number -and $number -le 9007199254740991 -and
+        $number -eq [math]::Truncate($number)
+}
+
+function Get-HudSignalState {
+    param([object]$Payload)
+
+    $stream = $null
+    try {
+        if ([Environment]::GetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE') -cne '1') {
+            return $null
+        }
+        $sessionId = Get-FirstValue -InputObject $Payload -Paths @('session_id')
+        $copilotHome = [Environment]::GetEnvironmentVariable('COPILOT_HOME')
+        if ($sessionId -isnot [string] -or
+            $sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$' -or
+            [string]::IsNullOrWhiteSpace($copilotHome) -or
+            $copilotHome -notmatch '^[A-Za-z]:[\\/]') {
+            return $null
+        }
+
+        $stateBase = Join-Path $copilotHome 'state'
+        $stateDirectory = Join-Path $stateBase 'hud-signal-bridge'
+        foreach ($directory in @($stateBase, $stateDirectory)) {
+            if (-not [System.IO.Directory]::Exists($directory)) { return $null }
+            $directoryAttributes = [System.IO.File]::GetAttributes($directory)
+            if (($directoryAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $null
+            }
+        }
+        $statePath = Join-Path $stateDirectory "hud-signal-$sessionId.json"
+        if (-not [System.IO.File]::Exists($statePath)) { return $null }
+        $attributes = [System.IO.File]::GetAttributes($statePath)
+        if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $null
+        }
+
+        $stream = [System.IO.FileStream]::new(
+            $statePath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+        )
+        $length = $stream.Length
+        if ($length -le 0 -or $length -gt 4096) { return $null }
+        $bytes = [byte[]]::new([int]$length)
+        $offset = 0
+        while ($offset -lt $length) {
+            $read = $stream.Read($bytes, $offset, [int]($length - $offset))
+            if ($read -le 0) { return $null }
+            $offset += $read
+        }
+        $stream.Dispose()
+        $stream = $null
+
+        $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        $state = ConvertFrom-Json -InputObject $text -AsHashtable -ErrorAction Stop
+        $allowedProperties = @(
+            'version', 'sessionId', 'updatedAtMs', 'phase', 'phaseAtMs',
+            'recentIncreaseNanoAiu', 'recentAtMs'
+        )
+        if ($state -isnot [System.Collections.IDictionary] -or
+            $state.Count -ne $allowedProperties.Count -or
+            @($state.Keys | Where-Object { $_ -notin $allowedProperties }).Count -gt 0 -or
+            -not (Test-HudSignalInteger $state['version']) -or
+            [long]$state['version'] -ne 1 -or
+            $state['sessionId'] -isnot [string] -or
+            $state['sessionId'] -cne $sessionId -or
+            -not (Test-HudSignalInteger $state['updatedAtMs'])) {
+            return $null
+        }
+
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $updatedAt = [double]$state['updatedAtMs']
+        if ($updatedAt -gt $now + 5000 -or $now - $updatedAt -gt 20000) {
+            return $null
+        }
+
+        $phase = $state['phase']
+        $phaseAt = $state['phaseAtMs']
+        if ($null -ne $phase) {
+            if ($phase -isnot [string] -or
+                $phase -cnotin @('working', 'running_tool', 'complete', 'idle') -or
+                -not (Test-HudSignalInteger $phaseAt) -or
+                [double]$phaseAt -gt $now + 5000) {
+                return $null
+            }
+            if ($phase -ceq 'complete' -and $now - [double]$phaseAt -gt 10000) {
+                $phase = $null
+                $phaseAt = $null
+            }
+        } elseif ($null -ne $phaseAt) {
+            return $null
+        }
+
+        $recentDelta = $state['recentIncreaseNanoAiu']
+        $recentAt = $state['recentAtMs']
+        if ($null -ne $recentDelta) {
+            if (-not (Test-HudSignalInteger $recentDelta) -or
+                -not (Test-HudSignalInteger $recentAt) -or
+                [double]$recentAt -gt $now + 5000) {
+                return $null
+            }
+            if ($now - [double]$recentAt -gt 120000) {
+                $recentDelta = $null
+                $recentAt = $null
+            }
+        } elseif ($null -ne $recentAt) {
+            return $null
+        }
+
+        return [ordered]@{
+            phase = $phase
+            phaseAtMs = $phaseAt
+            recentIncreaseNanoAiu = $recentDelta
+            recentAtMs = $recentAt
+        }
+    } catch {
+        return $null
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Get-HudPhaseSegment {
+    param([AllowNull()][object]$SignalState)
+
+    if ($SignalState -isnot [System.Collections.IDictionary]) { return $null }
+    switch ([string]$SignalState['phase']) {
+        'working' {
+            $glyph = $script:Bright + $script:Colors.yellow + '◐' + $script:Reset
+            $label = 'Working'
+        }
+        'running_tool' {
+            $glyph = $script:Bright + $script:Colors.yellow + '◐' + $script:Reset
+            $label = 'Running tool'
+        }
+        'complete' {
+            $glyph = $script:Bright + $script:Colors.green + '✓' + $script:Reset
+            $label = 'Complete'
+        }
+        default { return $null }
+    }
+    return $glyph + ' ' + $script:Bright + $script:Colors.white + $label + $script:Reset
 }
 
 function Save-FirstStatuslinePayload {
@@ -1473,7 +1650,8 @@ function Remove-OverflowSegments {
     }
     $postCompactDropOrderByLine = @{
         location = @('ctx-absolute')
-        activity = @('activity', 'agents')
+        usage = @('recent-aic')
+        activity = @('history', 'activity', 'agents', 'phase')
     }
     $script:CompactGroupSeparatorLines = @{}
     while ($true) {
@@ -1559,6 +1737,8 @@ if ([Environment]::GetEnvironmentVariable('COPILOT_RAW_PAYLOAD_CAPTURE') -ceq '1
 
 $sessionState = $null
 try { $sessionState = Get-SessionState -Payload $payload } catch { $sessionState = $null }
+$signalState = $null
+try { $signalState = Get-HudSignalState -Payload $payload } catch { $signalState = $null }
 
 $terminalWidth = Get-TerminalWidth -Payload $payload
 $script:ContextGaugeWidth = if ($terminalWidth -lt 60) { 5 } else { 8 }
@@ -1642,6 +1822,23 @@ $historySegment = Invoke-StatusSegment {
         -SpinnerGlyph $spinnerGlyph -MaximumItems $historyItemLimit -Mode history
 }
 
+$phaseSegment = $null
+if ($activeAgentSlots -eq 0 -and $activeToolGroups.Count -eq 0) {
+    $phaseCandidate = Invoke-StatusSegment {
+        Get-HudPhaseSegment -SignalState $signalState
+    }
+    if ($null -ne $phaseCandidate) {
+        $phaseName = [string]$signalState['phase']
+        if ($phaseName -in @('working', 'running_tool') -or
+            $null -eq $historySegment) {
+            $phaseSegment = $phaseCandidate
+            if ($phaseName -in @('working', 'running_tool')) {
+                $historySegment = $null
+            }
+        }
+    }
+}
+
 $segments = [System.Collections.Generic.List[object]]::new()
 
 foreach ($segment in @(
@@ -1678,6 +1875,10 @@ foreach ($segment in @(
         Value = (Invoke-StatusSegment { Get-AicSegment $payload })
     },
     [pscustomobject]@{
+        Key = 'recent-aic'; Group = 'aic-rate'; Line = 'usage'
+        Value = (Invoke-StatusSegment { Get-RecentAicSegment $signalState })
+    },
+    [pscustomobject]@{
         Key = 'rate'; Group = 'aic-rate'; Line = 'usage'
         Value = (Invoke-StatusSegment { Get-RateSegment $payload })
     },
@@ -1696,6 +1897,10 @@ foreach ($segment in @(
     [pscustomobject]@{
         Key = 'activity'; Group = 'active'; Line = 'activity'
         Value = $activitySegment
+    },
+    [pscustomobject]@{
+        Key = 'phase'; Group = 'active'; Line = 'activity'
+        Value = $phaseSegment
     },
     [pscustomobject]@{
         Key = 'history'; Group = 'history'; Line = 'activity'
