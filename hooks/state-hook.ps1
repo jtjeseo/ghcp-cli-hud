@@ -1,5 +1,70 @@
 # Temporary schema diagnostics only: set COPILOT_RAW_PAYLOAD_CAPTURE=1 for one run.
 # Unset it afterward; captures are retained until manually removed.
+$script:HookFailureDirectory = $null
+$script:HookFailureDetected = $false
+
+function Write-HookFailureMarker {
+    param([AllowNull()][string]$Directory)
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) { return }
+    try {
+        [void][System.IO.Directory]::CreateDirectory($Directory)
+        $path = Join-Path $Directory 'hud-hook-failure.log'
+        [System.IO.File]::WriteAllText(
+            $path,
+            "hook-state-failure$([Environment]::NewLine)",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+    } catch {
+    }
+}
+
+function Clear-HookFailureMarker {
+    param([AllowNull()][string]$Directory)
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) { return }
+    try {
+        $path = Join-Path $Directory 'hud-hook-failure.log'
+        if ([System.IO.File]::Exists($path)) {
+            [System.IO.File]::Delete($path)
+        }
+    } catch {
+    }
+}
+
+function ConvertTo-HudHashtable {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $null }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $converted = [ordered]@{}
+        foreach ($key in $Value.Keys) {
+            $converted[[string]$key] = ConvertTo-HudHashtable -Value $Value[$key]
+        }
+        return $converted
+    }
+
+    if ($Value -is [pscustomobject]) {
+        $converted = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $converted[$property.Name] = ConvertTo-HudHashtable -Value $property.Value
+        }
+        return $converted
+    }
+
+    if ($Value -is [array]) {
+        $items = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in $Value) {
+            [void]$items.Add((ConvertTo-HudHashtable -Value $item))
+        }
+        $converted = $items.ToArray()
+        return ,$converted
+    }
+
+    return $Value
+}
+
 try {
     [Console]::SetOut([System.IO.TextWriter]::Null)
     [Console]::SetError([System.IO.TextWriter]::Null)
@@ -175,16 +240,29 @@ try {
     param([string]$Path, [object]$State)
 
     $temporaryPath = "$Path.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = $null
     try {
         $json = ConvertTo-Json -InputObject $State -Depth 12 -Compress
         [System.IO.File]::WriteAllText($temporaryPath, $json, $utf8)
-        [System.IO.File]::Move($temporaryPath, $Path, $true)
+        if ([System.IO.File]::Exists($Path)) {
+            $backupPath = "$Path.$PID.$([guid]::NewGuid().ToString('N')).bak"
+            [System.IO.File]::Replace($temporaryPath, $Path, $backupPath)
+            if ([System.IO.File]::Exists($backupPath)) {
+                [System.IO.File]::Delete($backupPath)
+            }
+            $backupPath = $null
+        } else {
+            [System.IO.File]::Move($temporaryPath, $Path)
+        }
     } finally {
         if ([System.IO.File]::Exists($temporaryPath)) {
             [System.IO.File]::Delete($temporaryPath)
         }
+        if ($null -ne $backupPath -and [System.IO.File]::Exists($backupPath)) {
+            [System.IO.File]::Delete($backupPath)
+        }
     }
-}
+    }
 
     try {
     $eventName = if ($Event -is [string]) { $Event } else { '' }
@@ -194,22 +272,24 @@ try {
     )) { throw 'Unknown hook event.' }
     $Event = $eventName
 
-    $raw = [Console]::In.ReadToEnd()
-    $payload = ConvertFrom-Json -InputObject $raw -AsHashtable -ErrorAction Stop
-    if ($payload -isnot [System.Collections.IDictionary]) { throw 'Hook payload is not an object.' }
-
-    $sessionId = Get-FirstPayloadValue -Payload $payload -Paths @('sessionId')
-    if ($null -eq $sessionId) { throw 'Hook payload has no session identifier.' }
-    $sessionId = [string]$sessionId
-    if ($sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$') { throw 'Hook payload session identifier is not a safe filename.' }
-
     $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
         $env:COPILOT_HOME
     } else {
         Join-Path $env:USERPROFILE '.copilot'
     }
     $stateDirectory = Join-Path $copilotHome 'state'
+    $script:HookFailureDirectory = $stateDirectory
     [void][System.IO.Directory]::CreateDirectory($stateDirectory)
+
+    $raw = [Console]::In.ReadToEnd()
+    $payloadObject = ConvertFrom-Json -InputObject $raw -ErrorAction Stop
+    $payload = ConvertTo-HudHashtable -Value $payloadObject
+    if ($payload -isnot [System.Collections.IDictionary]) { throw 'Hook payload is not an object.' }
+
+    $sessionId = Get-FirstPayloadValue -Payload $payload -Paths @('sessionId')
+    if ($null -eq $sessionId) { throw 'Hook payload has no session identifier.' }
+    $sessionId = [string]$sessionId
+    if ($sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$') { throw 'Hook payload session identifier is not a safe filename.' }
 
     if ([Environment]::GetEnvironmentVariable('COPILOT_RAW_PAYLOAD_CAPTURE') -ceq '1') {
         try {
@@ -235,6 +315,7 @@ try {
         $animationPath = Join-Path $stateDirectory "statusline-animation-$sessionId.frame"
         if ([System.IO.File]::Exists($animationPath)) { [System.IO.File]::Delete($animationPath) }
         Remove-StaleFiles -Directory $stateDirectory
+        Clear-HookFailureMarker -Directory $stateDirectory
         exit 0
     }
 
@@ -242,13 +323,17 @@ try {
         $state = New-HudState -SessionId $sessionId -Now $now
     } else {
         try {
-            $state = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop |
-                ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            $storedStateObject = ConvertFrom-Json -InputObject (
+                Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop
+            ) -ErrorAction Stop
+            $state = ConvertTo-HudHashtable -Value $storedStateObject
             if ($state -isnot [System.Collections.IDictionary] -or
                 [string]$state['sessionId'] -cne $sessionId) {
                 throw 'Stored session state did not match the current session.'
             }
         } catch {
+            $script:HookFailureDetected = $true
+            Write-HookFailureMarker -Directory $stateDirectory
             $state = New-HudState -SessionId $sessionId -Now $now
         }
     }
@@ -508,7 +593,11 @@ try {
     $state['updatedAtMs'] = $now
     Write-HudState -Path $statePath -State $state
     if ($Event -eq 'sessionStart') { Remove-StaleFiles -Directory $stateDirectory }
+    if (-not $script:HookFailureDetected) {
+        Clear-HookFailureMarker -Directory $stateDirectory
+    }
 } catch {
+    Write-HookFailureMarker -Directory $script:HookFailureDirectory
 } finally {
     if ($null -ne $mutex) {
         if ($mutexAcquired) {

@@ -53,6 +53,8 @@ $script:Colors = @{
     yellow = Get-StatusColor -PaletteIndex 226 -FallbackCode 33
     red = Get-StatusColor -PaletteIndex 196 -FallbackCode 31
     green = Get-StatusColor -PaletteIndex 46 -FallbackCode 32
+    mutedGreen = Get-StatusColor -PaletteIndex 108 -FallbackCode 32
+    mutedRed = Get-StatusColor -PaletteIndex 131 -FallbackCode 31
     white = Get-StatusColor -PaletteIndex 15 -FallbackCode 37
 }
 $script:FilledGaugeChar = '█'
@@ -199,7 +201,9 @@ function Get-ActiveActivityEntries {
             }
         } else {
             $matchKey = Get-FirstValue -InputObject $entry -Paths @('matchKey')
-            if ($matchKey -isnot [string] -or [string]::IsNullOrWhiteSpace($matchKey)) {
+            if ($matchKey -isnot [string] -or
+                [string]::IsNullOrWhiteSpace($matchKey) -or
+                $Now - $startedAt -gt 300000) {
                 continue
             }
         }
@@ -572,16 +576,16 @@ function Get-TokenSegment {
     $parts = [System.Collections.Generic.List[string]]::new()
     if ($null -ne $inputTokens) {
         [void]$parts.Add($script:Dim + 'I(total):' + $script:Reset +
-            $script:Bright + $script:Colors.white + (Format-Count $inputTokens) + $script:Reset)
+            $script:Dim + (Format-Count $inputTokens) + $script:Reset)
     }
     if ($null -ne $outputTokens) {
         [void]$parts.Add($script:Dim + 'O:' + $script:Reset +
-            $script:Bright + $script:Colors.white + (Format-Count $outputTokens) + $script:Reset)
+            $script:Dim + (Format-Count $outputTokens) + $script:Reset)
     }
     if ($null -ne $cacheRead -or $null -ne $cacheWrite) {
         $cached = ($cacheRead ?? 0) + ($cacheWrite ?? 0)
         [void]$parts.Add($script:Dim + 'C:' + $script:Reset +
-            $script:Bright + $script:Colors.white + (Format-Count $cached) + $script:Reset)
+            $script:Dim + (Format-Count $cached) + $script:Reset)
     }
     if ($parts.Count -eq 0) { return $null }
     return [string]::Join('  ', $parts)
@@ -701,9 +705,9 @@ function Get-LinesSegment {
     } else {
         ([math]::Round($removed)).ToString('0', $culture)
     }
-    return $script:Bright + $script:Colors.green + '+' + $addedText + $script:Reset +
+    return $script:Colors.mutedGreen + '+' + $addedText + $script:Reset +
         $script:Dim + '/' + $script:Reset +
-        $script:Bright + $script:Colors.red + '-' + $removedText + $script:Reset
+        $script:Colors.mutedRed + '-' + $removedText + $script:Reset
 }
 
 function Get-SessionState {
@@ -744,7 +748,8 @@ function Test-HudSignalInteger {
         return $false
     }
     $number = ConvertTo-NullableNumber -Value $Value
-    return $null -ne $number -and $number -le 9007199254740991 -and
+    return $null -ne $number -and $number -ge 0 -and
+        $number -le 9007199254740991 -and
         $number -eq [math]::Truncate($number)
 }
 
@@ -801,13 +806,15 @@ function Get-HudSignalState {
 
         $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
         $state = ConvertFrom-Json -InputObject $text -AsHashtable -ErrorAction Stop
-        $allowedProperties = @(
+        $requiredProperties = @(
             'version', 'sessionId', 'updatedAtMs', 'phase', 'phaseAtMs',
             'recentIncreaseNanoAiu', 'recentAtMs'
         )
-        if ($state -isnot [System.Collections.IDictionary] -or
-            $state.Count -ne $allowedProperties.Count -or
-            @($state.Keys | Where-Object { $_ -notin $allowedProperties }).Count -gt 0 -or
+        $allowedProperties = $requiredProperties + @('activeSubagentCount')
+        if ($state -isnot [System.Collections.IDictionary]) { return $null }
+        $stateKeys = @($state.Keys)
+        if (@($requiredProperties | Where-Object { $_ -cnotin $stateKeys }).Count -gt 0 -or
+            @($stateKeys | Where-Object { $_ -cnotin $allowedProperties }).Count -gt 0 -or
             -not (Test-HudSignalInteger $state['version']) -or
             [long]$state['version'] -ne 1 -or
             $state['sessionId'] -isnot [string] -or
@@ -855,11 +862,22 @@ function Get-HudSignalState {
             return $null
         }
 
+        $activeSubagentCount = $null
+        if ($stateKeys -ccontains 'activeSubagentCount') {
+            $activeSubagentCount = $state['activeSubagentCount']
+            if ($null -ne $activeSubagentCount -and
+                (-not (Test-HudSignalInteger $activeSubagentCount) -or
+                    [long]$activeSubagentCount -gt 16)) {
+                return $null
+            }
+        }
+
         return [ordered]@{
             phase = $phase
             phaseAtMs = $phaseAt
             recentIncreaseNanoAiu = $recentDelta
             recentAtMs = $recentAt
+            activeSubagentCount = $activeSubagentCount
         }
     } catch {
         return $null
@@ -883,10 +901,24 @@ function Get-HudPhaseSegment {
         }
         'complete' {
             $glyph = $script:Bright + $script:Colors.green + '✓' + $script:Reset
-            $label = 'Complete'
+            $label = 'Assistant turn complete'
         }
         default { return $null }
     }
+    return $glyph + ' ' + $script:Bright + $script:Colors.white + $label + $script:Reset
+}
+
+function Get-HudSubagentSegment {
+    param([AllowNull()][object]$SignalState)
+
+    if ($SignalState -isnot [System.Collections.IDictionary]) { return $null }
+    $count = ConvertTo-NullableNumber -Value $SignalState['activeSubagentCount']
+    if ($null -eq $count -or $count -lt 1 -or $count -gt 16 -or
+        $count -ne [math]::Truncate($count)) {
+        return $null
+    }
+    $label = if ($count -eq 1) { '1 subagent' } else { "$([long]$count) subagents" }
+    $glyph = $script:Bright + $script:Colors.yellow + '◐' + $script:Reset
     return $glyph + ' ' + $script:Bright + $script:Colors.white + $label + $script:Reset
 }
 
@@ -1239,15 +1271,18 @@ function Get-AgentSegment {
                 if ($status -eq 'failed') {
                     $glyph = $script:Bright + $script:Colors.red + '✗' + $script:Reset
                 } elseif ($status -eq 'complete') {
-                    $glyph = $script:Bright + $script:Colors.green + '✓' + $script:Reset
+                    $glyph = $script:Dim + '•' + $script:Reset
                 } else {
                     $glyph = $script:Dim + '?' + $script:Reset
                 }
-                $completeText = $script:Dim + ' complete' + $script:Reset
-                if ($status -ne 'complete' -and $status -ne 'failed') {
-                    $completeText = $script:Dim + ' stopped' + $script:Reset
+                $outcomeText = if ($status -eq 'complete') {
+                    $script:Dim + ' ended' + $script:Reset
+                } elseif ($status -eq 'failed') {
+                    $script:Dim + ' failed' + $script:Reset
+                } else {
+                    $script:Dim + ' stopped' + $script:Reset
                 }
-                return $glyph + ' ' + $agentLabel + $agentName + $durationText + $completeText
+                return $glyph + ' ' + $agentLabel + $agentName + $durationText + $outcomeText
             }
         }
     } catch {
@@ -1268,6 +1303,10 @@ function Get-CompactActivityCategory {
                 return ([string]$toolName).ToLowerInvariant()
             }
         }
+        if ($label -ieq 'agent') {
+            $toolName = Get-FirstValue -InputObject $Activity -Paths @('toolName')
+            if ([string]$toolName -match '^(?i:task)$') { return 'task' }
+        }
         return $label.ToLowerInvariant()
     }
     return (ConvertTo-ActivityToolName -Tool $Activity)
@@ -1281,7 +1320,8 @@ function Get-CompactActivitySegment {
         [int]$TerminalWidth = 120,
         [string]$SpinnerGlyph = '◐',
         [int]$MaximumItems = 4,
-        [ValidateSet('all', 'active', 'history')][string]$Mode = 'all'
+        [ValidateSet('all', 'active', 'history')][string]$Mode = 'all',
+        [switch]$SuppressAgentHistory
     )
 
     try {
@@ -1360,13 +1400,21 @@ function Get-CompactActivitySegment {
             $recentTools = @($State['recentTools'] | Where-Object {
                 $_ -is [System.Collections.IDictionary] -or $_ -is [pscustomobject]
             })
+            if ($SuppressAgentHistory) {
+                $recentTools = @($recentTools | Where-Object {
+                    (Get-FirstValue -InputObject $_ -Paths @('category')) -cne 'agent'
+                })
+            }
         }
         if ($Mode -cne 'active' -and $recentTools.Count -eq 0 -and
             ($State['lastTool'] -is [System.Collections.IDictionary] -or
                 $State['lastTool'] -is [pscustomobject])) {
             $lastTool = $State['lastTool']
+            $lastToolCategory = Get-FirstValue -InputObject $lastTool -Paths @('category')
             $completedAt = ConvertTo-NullableNumber -Value $lastTool['completedAtMs']
-            if ($null -ne $completedAt -and $now -ge $completedAt -and $now - $completedAt -le 120000) {
+            if ((-not $SuppressAgentHistory -or $lastToolCategory -cne 'agent') -and
+                $null -ne $completedAt -and $now -ge $completedAt -and
+                $now - $completedAt -le 120000) {
                 $recentTools = @($lastTool)
             }
         }
@@ -1410,7 +1458,11 @@ function Get-CompactActivitySegment {
             }
         }
 
-        $lastAgent = if ($Mode -cne 'active') { $State['lastSubagent'] } else { $null }
+        $lastAgent = if ($Mode -cne 'active' -and -not $SuppressAgentHistory) {
+            $State['lastSubagent']
+        } else {
+            $null
+        }
         if ($lastAgent -is [System.Collections.IDictionary] -or $lastAgent -is [pscustomobject]) {
             $completedAt = ConvertTo-NullableNumber -Value $lastAgent['completedAtMs']
             $agentStatus = [string]$lastAgent['status']
@@ -1421,7 +1473,7 @@ function Get-CompactActivitySegment {
                 $label = Get-AgentLabel -Agent $lastAgent
                 if (-not $label) { $label = 'agent' }
                 $status = switch ($agentStatus) {
-                    'complete' { 'complete' }
+                    'complete' { 'ended' }
                     'failed' { 'failed' }
                     default { 'unknown' }
                 }
@@ -1448,8 +1500,13 @@ function Get-CompactActivitySegment {
             if ($items.Count -ge $MaximumItems) { break }
             $glyph = switch ($group.status) {
                 'failed' { $script:Bright + $script:Colors.red + '✗' + $script:Reset }
-                'complete' { $script:Bright + $script:Colors.green + '✓' + $script:Reset }
+                'ended' { $script:Dim + '•' + $script:Reset }
                 default { $script:Dim + '?' + $script:Reset }
+            }
+            $outcomeText = switch ($group.status) {
+                'ended' { $script:Dim + ' ended' + $script:Reset }
+                'failed' { $script:Dim + ' failed' + $script:Reset }
+                default { $script:Dim + ' stopped' + $script:Reset }
             }
             $repeatText = if ($group.count -gt 1) { " x$($group.count)" } else { '' }
             $durationText = if ($null -ne $group.durationMs) {
@@ -1460,7 +1517,7 @@ function Get-CompactActivitySegment {
             [void]$items.Add([pscustomobject]@{
                 kind = 'history'
                 text = $glyph + ' ' + $script:Bright + $script:Colors.white +
-                    $group.label + $script:Reset + $repeatText + $durationText
+                    $group.label + $script:Reset + $outcomeText + $repeatText + $durationText
             })
         }
 
@@ -1651,7 +1708,7 @@ function Remove-OverflowSegments {
     $postCompactDropOrderByLine = @{
         location = @('ctx-absolute')
         usage = @('recent-aic')
-        activity = @('history', 'activity', 'agents', 'phase')
+        activity = @('history', 'agents', 'activity', 'phase')
     }
     $script:CompactGroupSeparatorLines = @{}
     while ($true) {
@@ -1758,8 +1815,19 @@ if ($sessionState -is [System.Collections.IDictionary]) {
     }
 }
 
-$activeAgentSegment = Invoke-StatusSegment {
-    Get-CompactAgentSegment $sessionState $spinnerGlyph
+$bridgeSubagentSegment = Invoke-StatusSegment {
+    Get-HudSubagentSegment -SignalState $signalState
+}
+$bridgeSubagentCountKnown = $false
+if ($signalState -is [System.Collections.IDictionary]) {
+    $bridgeSubagentCountKnown = $null -ne $signalState['activeSubagentCount']
+}
+$activeAgentSegment = if ($bridgeSubagentCountKnown) {
+    $bridgeSubagentSegment
+} else {
+    Invoke-StatusSegment {
+        Get-CompactAgentSegment $sessionState $spinnerGlyph
+    }
 }
 $activeAgentSlots = if ($null -ne $activeAgentSegment) { 1 } else { 0 }
 $activeToolGroups = @()
@@ -1775,23 +1843,11 @@ try {
 } catch {
     $activeToolGroups = @()
 }
-$activityItemLimit = [math]::Max(
-    0,
-    [math]::Min(4 - $activeAgentSlots, $activeToolGroups.Count)
-)
+$activityItemLimit = [math]::Max(0, [math]::Min(4, $activeToolGroups.Count))
 $agentTextWidth = Get-VisibleTextLength ([string]$activeAgentSegment)
-$agentToolSeparatorWidth = if ($activeAgentSlots -gt 0 -and $activityItemLimit -gt 0) {
-    Get-VisibleTextLength $script:SegmentSeparator
-} else {
-    0
-}
-$activityWidth = [math]::Max(
-    0,
-    $terminalWidth - $agentTextWidth - $agentToolSeparatorWidth
-)
 $activitySegment = Invoke-StatusSegment {
     Get-CompactActivitySegment -Payload $payload -State $sessionState `
-        -Width $activityWidth -TerminalWidth $terminalWidth `
+        -Width $terminalWidth -TerminalWidth $terminalWidth `
         -SpinnerGlyph $spinnerGlyph -MaximumItems $activityItemLimit -Mode active
 }
 $activitySlots = if ($null -ne $activitySegment) {
@@ -1819,7 +1875,8 @@ $historyWidth = [math]::Max(
 $historySegment = Invoke-StatusSegment {
     Get-CompactActivitySegment -Payload $payload -State $sessionState `
         -Width $historyWidth -TerminalWidth $terminalWidth `
-        -SpinnerGlyph $spinnerGlyph -MaximumItems $historyItemLimit -Mode history
+        -SpinnerGlyph $spinnerGlyph -MaximumItems $historyItemLimit -Mode history `
+    -SuppressAgentHistory:$bridgeSubagentCountKnown
 }
 
 $phaseSegment = $null

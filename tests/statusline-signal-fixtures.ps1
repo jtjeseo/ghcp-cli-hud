@@ -11,7 +11,10 @@ $stateDirectory = Join-Path $copilotHome 'state'
 $signalDirectory = Join-Path $stateDirectory 'hud-signal-bridge'
 $sessionId = 'fixture-session'
 $hookStatePath = Join-Path $stateDirectory "hud-state-$sessionId.json"
+$foreignSessionId = 'foreign-fixture-session'
+$foreignHookStatePath = Join-Path $stateDirectory "hud-state-$foreignSessionId.json"
 $signalStatePath = Join-Path $signalDirectory "hud-signal-$sessionId.json"
+$foreignSignalStatePath = Join-Path $signalDirectory "hud-signal-$foreignSessionId.json"
 $atomicSessionId = 'atomic-fixture'
 $atomicSignalStatePath = Join-Path $signalDirectory "hud-signal-$atomicSessionId.json"
 $atomicReadyPath = Join-Path $testRoot 'atomic-writer.ready'
@@ -24,9 +27,9 @@ function Assert-Fixture {
 }
 
 function Get-FixturePayload {
-    param([int]$Width)
+    param([int]$Width, [switch]$ZeroUsage)
 
-    return [ordered]@{
+    $payload = [ordered]@{
         session_id = $sessionId
         cwd = $repositoryRoot
         terminal_width = $Width
@@ -47,6 +50,17 @@ function Get-FixturePayload {
             total_lines_removed = 15
         }
     }
+    if ($ZeroUsage) {
+        foreach ($name in @(
+            'total_input_tokens', 'total_output_tokens',
+            'total_cache_read_tokens', 'total_cache_write_tokens'
+        )) {
+            $payload.context_window[$name] = 0
+        }
+        $payload.cost.total_lines_added = 0
+        $payload.cost.total_lines_removed = 0
+    }
+    return $payload
 }
 
 function Get-FixtureHookState {
@@ -77,9 +91,10 @@ function Get-FixtureHookState {
 
 function Get-FixtureSignalState {
     param(
-        [string]$Phase,
+        [AllowNull()][object]$Phase,
         [AllowNull()][object]$RecentDelta = 39907500,
-        [long]$Now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        [long]$Now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(),
+        [AllowNull()][object]$ActiveSubagentCount = $null
     )
 
     $phaseAt = if ($null -ne $Phase) { $Now - 1000 } else { $null }
@@ -92,6 +107,7 @@ function Get-FixtureSignalState {
         phaseAtMs = $phaseAt
         recentIncreaseNanoAiu = $RecentDelta
         recentAtMs = $recentAt
+        activeSubagentCount = $ActiveSubagentCount
     }
 }
 
@@ -101,6 +117,34 @@ function Write-FixtureJson {
     [System.IO.File]::WriteAllText($Path, $json, $utf8)
 }
 
+function Refresh-FixtureTimestamps {
+    param(
+        [AllowNull()][object]$Value,
+        [long]$From,
+        [long]$To
+    )
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in @($Value.Keys)) {
+            $current = $Value[$key]
+            if ($key -ceq 'updatedAtMs') {
+                $Value[$key] = $To
+            } elseif ($key -ceq 'createdAtMs') {
+                continue
+            } elseif ($key -match 'AtMs$' -and
+                $current -is [ValueType] -and $current -isnot [bool]) {
+                $Value[$key] = [long]$current + ($To - $From)
+            } else {
+                Refresh-FixtureTimestamps -Value $current -From $From -To $To
+            }
+        }
+    } elseif ($Value -is [System.Collections.IList]) {
+        foreach ($item in $Value) {
+            Refresh-FixtureTimestamps -Value $item -From $From -To $To
+        }
+    }
+}
+
 function Invoke-StatuslineFixture {
     param(
         [int]$Width,
@@ -108,8 +152,25 @@ function Invoke-StatuslineFixture {
         [string]$BridgeEnabled = '1',
         [AllowNull()][object]$HookState,
         [AllowNull()][object]$SignalState,
-        [ValidateSet('normal', 'malformed', 'oversize')][string]$SignalFile = 'normal'
+        [ValidateSet('normal', 'malformed', 'oversize')][string]$SignalFile = 'normal',
+        [switch]$PreserveSignalTimestamp,
+        [switch]$PreserveHookTimestamp,
+        [switch]$ZeroUsage
     )
+
+    $fixtureNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if (-not $PreserveHookTimestamp -and
+        $HookState -is [System.Collections.IDictionary] -and
+        $HookState['updatedAtMs'] -is [ValueType]) {
+        Refresh-FixtureTimestamps -Value $HookState `
+            -From ([long]$HookState['updatedAtMs']) -To $fixtureNow
+    }
+    if (-not $PreserveSignalTimestamp -and
+        $SignalState -is [System.Collections.IDictionary] -and
+        $SignalState['updatedAtMs'] -is [ValueType]) {
+        Refresh-FixtureTimestamps -Value $SignalState `
+            -From ([long]$SignalState['updatedAtMs']) -To $fixtureNow
+    }
 
     if ($null -eq $HookState) {
         if ([System.IO.File]::Exists($hookStatePath)) {
@@ -131,7 +192,7 @@ function Invoke-StatuslineFixture {
         Write-FixtureJson -Path $signalStatePath -Value $SignalState
     }
 
-    $payloadJson = ConvertTo-Json -InputObject (Get-FixturePayload -Width $Width) `
+    $payloadJson = ConvertTo-Json -InputObject (Get-FixturePayload -Width $Width -ZeroUsage:$ZeroUsage) `
         -Depth 8 -Compress
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new($pwshPath)
     $startInfo.UseShellExecute = $false
@@ -198,13 +259,15 @@ const store = await createSignalStateStore(home, sessionId);
 const now = Date.now();
 await store.write({
   version: 1, sessionId, updatedAtMs: now, phase: "working",
-  phaseAtMs: now, recentIncreaseNanoAiu: null, recentAtMs: null
+  phaseAtMs: now, recentIncreaseNanoAiu: null, recentAtMs: null,
+  activeSubagentCount: null
 });
 await writeFile(readyPath, "ready", { encoding: "utf8", mode: 0o600 });
 for (let index = 0; index < 40; index += 1) {
   await store.write({
     version: 1, sessionId, updatedAtMs: now + index + 1, phase: "working",
-    phaseAtMs: now, recentIncreaseNanoAiu: index + 1, recentAtMs: now
+    phaseAtMs: now, recentIncreaseNanoAiu: index + 1, recentAtMs: now,
+    activeSubagentCount: null
   });
   await new Promise(resolve => setTimeout(resolve, 3));
 }
@@ -285,7 +348,7 @@ await writeFile(donePath, "done", { encoding: "utf8", mode: 0o600 });
     Assert-Fixture ($exitCode -eq 0 -and [string]::IsNullOrEmpty($stderr)) `
         'Atomic fixture writer failed.'
     Assert-Fixture ($readCount -gt 0) 'No concurrent shared reads were observed.'
-    'ConcurrentSharedReads={0}; AtomicReplacements=40' -f $readCount
+    'ConcurrentSharedReads={0}; SnapshotUpdateWrites=40; InitialSnapshotWrite=1' -f $readCount
 }
 
 New-Item -ItemType Directory -Path $signalDirectory -Force | Out-Null
@@ -326,6 +389,96 @@ try {
         }
     }
 
+    $mutedPalette = @(
+        @{
+            Name = 'zero'
+            ZeroUsage = $true
+            Expected = "`e[38;5;244mI(total):`e[0m`e[38;5;244m0`e[0m  `e[38;5;244mO:`e[0m`e[38;5;244m0`e[0m  `e[38;5;244mC:`e[0m`e[38;5;244m0`e[0m `e[38;5;244m│`e[0m `e[38;5;108m+0`e[0m`e[38;5;244m/`e[0m`e[38;5;131m-0`e[0m"
+            PlainTail = 'I(total):0  O:0  C:0 │ +0/-0'
+        },
+        @{
+            Name = 'populated'
+            ZeroUsage = $false
+            Expected = "`e[38;5;244mI(total):`e[0m`e[38;5;244m100k`e[0m  `e[38;5;244mO:`e[0m`e[38;5;244m8k`e[0m  `e[38;5;244mC:`e[0m`e[38;5;244m2.2k`e[0m `e[38;5;244m│`e[0m `e[38;5;108m+120`e[0m`e[38;5;244m/`e[0m`e[38;5;131m-15`e[0m"
+            PlainTail = 'I(total):100k  O:8k  C:2.2k │ +120/-15'
+        }
+    )
+    foreach ($case in $mutedPalette) {
+        foreach ($width in @(80, 120, 160)) {
+            $paletteState = Get-FixtureSignalState -Phase $null -RecentDelta $null -Now $now
+            $ansi = Invoke-StatuslineFixture -Width $width -NoColor $false `
+                -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+                -SignalState $paletteState -ZeroUsage:$case.ZeroUsage
+            $plain = Invoke-StatuslineFixture -Width $width -NoColor $true `
+                -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+                -SignalState $paletteState -ZeroUsage:$case.ZeroUsage
+            $ansiLines = @(Get-OutputLines $ansi)
+            $plainLines = @(Get-OutputLines $plain)
+            Assert-Fixture ($ansiLines.Count -eq $plainLines.Count -and $ansiLines.Count -ge 2) `
+                "Muted-palette line count changed ($($case.Name), width $width)."
+            Assert-Fixture ($ansiLines[1].EndsWith($case.Expected, [System.StringComparison]::Ordinal)) `
+                "Muted I/O/C or changeset palette mismatch ($($case.Name), width $width)."
+            $mutedSegment = $case.Expected
+            Assert-Fixture ($mutedSegment -notmatch "`e\[1m" -and
+                $mutedSegment -notmatch '38;5;(15|46|196)m') `
+                'Expected muted palette contains a former bold/bright code.'
+            $renderedSegment = $ansiLines[1].Substring(
+                $ansiLines[1].Length - $case.Expected.Length)
+            Assert-Fixture ($renderedSegment -notmatch "`e\[1m" -and
+                $renderedSegment -notmatch '38;5;(15|46|196)m') `
+                "Former bold/bright I/O/C or changeset code rendered ($($case.Name), width $width)."
+            Assert-Fixture ($plain -notmatch "`e") `
+                "NO_COLOR palette output contained ANSI escapes ($($case.Name), width $width)."
+            Assert-Fixture ($plainLines[1].EndsWith($case.PlainTail, [System.StringComparison]::Ordinal)) `
+                "NO_COLOR I/O/C or changeset text changed ($($case.Name), width $width)."
+            Assert-Fixture ((Get-PlainText $ansiLines[1]) -ceq $plainLines[1]) `
+                "ANSI and NO_COLOR line-2 text diverged ($($case.Name), width $width)."
+            Assert-Fixture ((Get-VisibleLength $ansiLines[1]) -le $width) `
+                "Muted-palette line 2 exceeded width $width ($($case.Name))."
+        }
+    }
+    'MutedPalette=zero,populated; Widths=80,120,160; I/O/C+separators=244; added=108; removed=131; FormerBoldBright=absent; NO_COLOR=unchanged'
+
+    $roundingCases = @(
+        [pscustomobject]@{
+            NanoAiu = 6384999999
+            Expected = 'recent +6.38 AIU'
+        },
+        [pscustomobject]@{
+            NanoAiu = 6385000000
+            Expected = 'recent +6.39 AIU'
+        },
+        [pscustomobject]@{
+            NanoAiu = 1
+            Expected = 'recent +0.000000001 AIU'
+        }
+    )
+    foreach ($width in @(120, 160)) {
+        foreach ($noColor in @($false, $true)) {
+            foreach ($roundingCase in $roundingCases) {
+                $roundingState = Get-FixtureSignalState -Phase $null `
+                    -RecentDelta $roundingCase.NanoAiu -Now $now
+                $roundingOutput = Invoke-StatuslineFixture -Width $width `
+                    -NoColor $noColor `
+                    -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+                    -SignalState $roundingState
+                $roundingLines = @(Get-OutputLines $roundingOutput)
+                $roundingPlain = @(
+                    $roundingLines | ForEach-Object { Get-PlainText $_ }
+                )
+                Assert-Fixture ($roundingPlain[1] -match [regex]::Escape($roundingCase.Expected)) `
+                    "AIU rounding mismatch at width $width (NO_COLOR=$noColor)."
+                if ($noColor) {
+                    Assert-Fixture ($roundingOutput -notmatch "`e") `
+                        'NO_COLOR rounding output contained ANSI escapes.'
+                } else {
+                    Assert-Fixture ($roundingOutput -match "`e\[[0-9;]*m") `
+                        'Colored rounding output contained no ANSI escapes.'
+                }
+            }
+        }
+    }
+
     foreach ($width in @(80, 120, 160)) {
         $idleOutput = Invoke-StatuslineFixture -Width $width -NoColor $true `
             -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
@@ -333,25 +486,144 @@ try {
         $phaseOutput = Invoke-StatuslineFixture -Width $width -NoColor $true `
             -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
             -SignalState (Get-FixtureSignalState -Phase 'running_tool' -Now $now)
+        $noSignalOutput = Invoke-StatuslineFixture -Width $width -NoColor $true `
+            -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+            -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null -Now $now)
+        $agentOutput = Invoke-StatuslineFixture -Width $width -NoColor $true `
+            -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+            -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+                -Now $now -ActiveSubagentCount 2)
+        $singleAgentOutput = Invoke-StatuslineFixture -Width $width -NoColor $true `
+            -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+            -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+                -Now $now -ActiveSubagentCount 1)
         $idleLines = @(Get-OutputLines $idleOutput)
         $phaseLines = @(Get-OutputLines $phaseOutput)
+        $noSignalLines = @(Get-OutputLines $noSignalOutput)
+        $agentLines = @(Get-OutputLines $agentOutput)
+        $singleAgentLines = @(Get-OutputLines $singleAgentOutput)
         Assert-Fixture ($idleLines.Count -eq 2) "Idle HUD did not render exactly two lines at width $width."
         Assert-Fixture ($phaseLines.Count -eq 3) "Active phase did not render a third line at width $width."
+        Assert-Fixture ($noSignalLines.Count -eq 2) `
+            "HUD without phase, recent delta, or Fleet signals did not render two lines at width $width."
+        Assert-Fixture ($agentLines.Count -eq 3) `
+            "Fleet count did not render a third line at width ${width}: $($agentLines -join ' | ')"
+        Assert-Fixture ($singleAgentLines.Count -eq 3 -and
+            (Get-PlainText $singleAgentLines[2]) -match '◐ 1 subagent') `
+            "Single-agent count did not render at width $width."
+        Assert-Fixture ((Get-VisibleLength $singleAgentLines[2]) -le $width) `
+            "Single-agent activity exceeded width $width."
         Assert-Fixture ($idleLines[0] -ceq $phaseLines[0]) 'Activity shifted line 1.'
         Assert-Fixture ($idleLines[1] -ceq $phaseLines[1]) 'Activity shifted line 2.'
+        Assert-Fixture ($noSignalLines[0] -ceq $agentLines[0]) 'Fleet count shifted line 1.'
+        Assert-Fixture ($noSignalLines[1] -ceq $agentLines[1]) 'Fleet count shifted line 2.'
+        Assert-Fixture ($noSignalLines[0] -ceq $singleAgentLines[0]) 'Single-agent count shifted line 1.'
+        Assert-Fixture ($noSignalLines[1] -ceq $singleAgentLines[1]) 'Single-agent count shifted line 2.'
+        Assert-Fixture ((Get-PlainText $agentLines[2]) -match '◐ 2 subagents') `
+            "Active Fleet count missing at width $width."
+        Assert-Fixture ((Get-VisibleLength $agentLines[2]) -le $width) `
+            "Fleet activity line exceeded width $width."
+        Assert-Fixture ($agentOutput -notmatch "`e") `
+            "NO_COLOR Fleet output contained ANSI escapes at width $width."
     }
+
+    $narrowFleet = Invoke-StatuslineFixture -Width 24 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $true -Now $now) `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $now -ActiveSubagentCount 2)
+    $narrowFleetLines = @(Get-OutputLines $narrowFleet)
+    Assert-Fixture ($narrowFleetLines.Count -eq 3 -and
+        $narrowFleetLines[2] -match 'powershell' -and
+        $narrowFleetLines[2] -notmatch 'subagents') `
+        'Active tool activity did not retain its priority over a bridge agent count at narrow width.'
+    Assert-Fixture ((Get-VisibleLength $narrowFleetLines[2]) -le 24) `
+        'Narrow activity overflow was not degraded by dropping a whole segment.'
+
+    $foreignSignal = Get-FixtureSignalState -Phase $null -RecentDelta $null `
+        -Now $now -ActiveSubagentCount 2
+    $foreignSignal.sessionId = $foreignSessionId
+    Write-FixtureJson -Path $foreignSignalStatePath -Value $foreignSignal
+    $currentSessionSignal = Get-FixtureSignalState -Phase $null -RecentDelta $null `
+        -Now ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -ActiveSubagentCount 1
+    $currentSessionRender = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+        -SignalState $currentSessionSignal
+    $currentSessionLines = @(Get-OutputLines $currentSessionRender)
+    Assert-Fixture ($currentSessionLines.Count -eq 3 -and
+        $currentSessionLines[2] -match '1 subagent' -and
+        $currentSessionLines[2] -notmatch '2 subagents') `
+        'Concurrent session bridge files were combined or selected by recency.'
+    [System.IO.File]::Delete($foreignSignalStatePath)
+
+    $coloredFleet = Invoke-StatuslineFixture -Width 120 -NoColor $false `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $now -ActiveSubagentCount 2)
+    $coloredFleetLines = @(Get-OutputLines $coloredFleet)
+    Assert-Fixture ($coloredFleetLines[2] -match "`e\[38;5;226m◐") `
+        'Fleet activity glyph was not yellow.'
 
     $activeHook = Get-FixtureHookState -WithActiveTool $true -Now $now
     $signalPhase = Get-FixtureSignalState -Phase 'running_tool' -Now $now
+    $signalFleet = Get-FixtureSignalState -Phase $null -RecentDelta $null `
+        -Now $now -ActiveSubagentCount 2
     $hookFallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
-        -BridgeEnabled '0' -HookState $activeHook -SignalState $signalPhase
+        -BridgeEnabled '0' -HookState $activeHook -SignalState $signalFleet
     $hookLines = @(Get-OutputLines $hookFallback)
     Assert-Fixture ($hookLines.Count -eq 3 -and $hookLines[2] -match 'powershell') `
         'Disabled bridge did not preserve the hook activity fallback.'
-    Assert-Fixture ($hookLines[2] -notmatch 'Running tool') `
-        'Disabled bridge rendered a phase signal.'
+    Assert-Fixture ($hookLines[2] -notmatch 'subagents') `
+        'Disabled bridge rendered a Fleet count.'
     Assert-Fixture ($hookLines[1] -notmatch 'recent \+') `
         'Disabled bridge rendered a recent AIC increase.'
+
+    foreach ($mixedWidth in @(80, 120, 160)) {
+        $mixedNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $agentAndToolHook = Get-FixtureHookState -WithActiveTool $true -Now $mixedNow
+        $agentAndToolHook.activeSubagents = @([ordered]@{
+            matchKey = 'analysis'
+            agentKey = $null
+            startedAtMs = $mixedNow - 7000
+            timingReliable = $true
+        })
+        $mixedFleetState = Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $mixedNow -ActiveSubagentCount 2
+        $unknownFleetState = Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $mixedNow -ActiveSubagentCount $null
+        $fleetWithActiveTool = Invoke-StatuslineFixture -Width $mixedWidth -NoColor $true `
+            -HookState $agentAndToolHook -SignalState $mixedFleetState
+        $hookBaseline = Invoke-StatuslineFixture -Width $mixedWidth -NoColor $true `
+            -HookState $agentAndToolHook -SignalState $unknownFleetState
+        $fleetWithActiveToolLines = @(Get-OutputLines $fleetWithActiveTool)
+        $hookBaselineLines = @(Get-OutputLines $hookBaseline)
+        Assert-Fixture ($fleetWithActiveToolLines.Count -eq 3 -and
+            $fleetWithActiveToolLines[2] -match '2 subagents' -and
+            $fleetWithActiveToolLines[2] -match 'powershell') `
+            "Fresh Fleet count hid useful hook tool information at width $mixedWidth."
+        Assert-Fixture ($fleetWithActiveToolLines[2] -notmatch 'analysis') `
+            'The hook agent was duplicated alongside the aggregate Fleet count.'
+        Assert-Fixture ($fleetWithActiveToolLines[0] -ceq $hookBaselineLines[0] -and
+            $fleetWithActiveToolLines[1] -ceq $hookBaselineLines[1]) `
+            "Fleet precedence changed HUD lines 1/2 at width $mixedWidth."
+        Assert-Fixture ((Get-VisibleLength $fleetWithActiveToolLines[2]) -le $mixedWidth) `
+            "Mixed Fleet activity exceeded width $mixedWidth."
+    }
+
+    $agentDispatchHook = Get-FixtureHookState -WithActiveTool $false -Now $now
+    $agentDispatchHook.activeTools = @([ordered]@{
+        category = 'agent'
+        toolName = 'task'
+        target = 'workspace'
+        startedAtMs = $now - 7000
+        timingReliable = $true
+    })
+    $fleetWithDispatchTool = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $agentDispatchHook -SignalState $signalFleet
+    $fleetWithDispatchLines = @(Get-OutputLines $fleetWithDispatchTool)
+    Assert-Fixture ($fleetWithDispatchLines[2] -match '2 subagents' -and
+        $fleetWithDispatchLines[2] -match 'task' -and
+        $fleetWithDispatchLines[2] -notmatch 'agent running') `
+        'The spawning task tool was obscured by or confused with the Fleet count.'
 
     $noExtension = Invoke-StatuslineFixture -Width 120 -NoColor $true `
         -BridgeEnabled '1' -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
@@ -374,12 +646,134 @@ try {
         timingReliable = $true
     })
     $agentFallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
-        -HookState $agentHook -SignalState $signalPhase
+        -HookState $agentHook -SignalState $signalFleet
     $agentLines = @(Get-OutputLines $agentFallback)
-    Assert-Fixture ($agentLines.Count -eq 3 -and $agentLines[2] -match 'analysis') `
-        'Hook-based agent display was not preserved.'
-    Assert-Fixture ($agentLines[2] -notmatch 'Running tool') `
-        'Bridge phase duplicated hook-based agent activity.'
+    Assert-Fixture ($agentLines.Count -eq 3 -and $agentLines[2] -match '2 subagents') `
+        'A fresh bridge count was hidden by hook-based agent activity.'
+    Assert-Fixture ($agentLines[2] -notmatch 'analysis') `
+        'Hook-based agent activity was duplicated alongside the bridge count.'
+
+    $recentAgentHook = Get-FixtureHookState -WithActiveTool $false -Now $now
+    $recentAgentHook.lastSubagent = [ordered]@{
+        matchKey = 'analysis'
+        status = 'complete'
+        completedAtMs = $now - 1000
+        durationMs = 4000
+    }
+    $recentAgentFallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $recentAgentHook -SignalState $signalFleet
+    $recentAgentLines = @(Get-OutputLines $recentAgentFallback)
+    Assert-Fixture ($recentAgentLines.Count -eq 3 -and $recentAgentLines[2] -match '2 subagents') `
+        'A fresh bridge count was hidden by recent hook agent history.'
+    Assert-Fixture ($recentAgentLines[2] -notmatch 'analysis') `
+        'Recent hook agent history was duplicated alongside the bridge count.'
+
+    $zeroWithRecentHookAgent = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $recentAgentHook `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $now -ActiveSubagentCount 0)
+    $zeroWithRecentHookLines = @(Get-OutputLines $zeroWithRecentHookAgent)
+    Assert-Fixture ($zeroWithRecentHookLines.Count -eq 2 -and
+        ($zeroWithRecentHookLines -join ' ') -notmatch 'analysis|ended|complete') `
+        'Confirmed zero did not suppress recent hook-agent history.'
+
+    $unknownFleetWithAgent = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $agentHook `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $now -ActiveSubagentCount $null)
+    $unknownFleetAgentLines = @(Get-OutputLines $unknownFleetWithAgent)
+    Assert-Fixture ($unknownFleetAgentLines.Count -eq 3 -and
+        $unknownFleetAgentLines[2] -match 'analysis' -and
+        $unknownFleetAgentLines[2] -notmatch 'subagents') `
+        'An unknown bridge count did not fall back to the hook agent display.'
+
+    $unknownFleet = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $now -ActiveSubagentCount $null)
+    Assert-Fixture (@(Get-OutputLines $unknownFleet).Count -eq 2) `
+        'Unknown subagent state made an active/completed claim.'
+
+    $zeroFleet = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $now -ActiveSubagentCount 0)
+    Assert-Fixture (@(Get-OutputLines $zeroFleet).Count -eq 2) `
+        'A zero subagent count rendered an active or complete claim.'
+
+    $zeroWithHookAgent = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $agentHook `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $now -ActiveSubagentCount 0)
+    $zeroWithHookAgentLines = @(Get-OutputLines $zeroWithHookAgent)
+    Assert-Fixture ($zeroWithHookAgentLines.Count -eq 2 -and
+        $zeroWithHookAgentLines[2] -notmatch 'analysis|subagents') `
+        'A fresh confirmed zero did not suppress stale hook-agent claims.'
+
+    $expiredHookAgent = Get-FixtureHookState -WithActiveTool $false -Now $now
+    $expiredHookAgent.activeSubagents = @([ordered]@{
+        matchKey = 'expired-agent'
+        agentKey = $null
+        startedAtMs = $now - 300001
+        timingReliable = $true
+    })
+    $expiredHookFallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -BridgeEnabled '0' -HookState $expiredHookAgent -SignalState $signalFleet `
+        -PreserveHookTimestamp
+    Assert-Fixture (@(Get-OutputLines $expiredHookFallback).Count -eq 2) `
+        'An expired hook-agent lifecycle remained visible indefinitely.'
+
+    $invalidFleet = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $now) `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null `
+            -Now $now -ActiveSubagentCount 17)
+    Assert-Fixture (@(Get-OutputLines $invalidFleet).Count -eq 2) `
+        'An out-of-range subagent count was rendered.'
+
+    $negativeCountFallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $agentHook -SignalState (Get-FixtureSignalState `
+            -Phase $null -RecentDelta $null -Now $now -ActiveSubagentCount -1)
+    $negativeCountLines = @(Get-OutputLines $negativeCountFallback)
+    Assert-Fixture ($negativeCountLines.Count -eq 3 -and
+        $negativeCountLines[2] -match 'analysis' -and
+        $negativeCountLines[2] -notmatch 'subagents') `
+        'A negative bridge count suppressed matching hook fallback.'
+
+    $negativePhase = Get-FixtureSignalState -Phase 'working' -Now $now `
+        -ActiveSubagentCount 2
+    $negativePhase.phaseAtMs = -1
+    $negativePhaseFallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $agentHook -SignalState $negativePhase -PreserveSignalTimestamp
+    $negativePhaseLines = @(Get-OutputLines $negativePhaseFallback)
+    Assert-Fixture ($negativePhaseLines.Count -eq 3 -and
+        $negativePhaseLines[2] -match 'analysis' -and
+        $negativePhaseLines[2] -notmatch 'subagents|Working') `
+        'A negative bridge phase timestamp rendered or suppressed hook fallback.'
+
+    $disabledWithHookAgent = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -BridgeEnabled '0' -HookState $agentHook -SignalState $signalFleet
+    $disabledHookLines = @(Get-OutputLines $disabledWithHookAgent)
+    Assert-Fixture ($disabledHookLines.Count -eq 3 -and $disabledHookLines[2] -match 'analysis') `
+        'Hook agent fallback was not preserved when the bridge was absent.'
+    Assert-Fixture ($disabledHookLines[2] -notmatch 'subagents') `
+        'Disabled bridge rendered a Fleet count over hook activity.'
+
+    $foreignHook = Get-FixtureHookState -WithActiveTool $false -Now $now
+    $foreignHook.sessionId = $foreignSessionId
+    $foreignHook.activeSubagents = @([ordered]@{
+        matchKey = 'foreign-agent-marker'
+        agentKey = $null
+        startedAtMs = $now - 7000
+        timingReliable = $true
+    })
+    Write-FixtureJson -Path $foreignHookStatePath -Value $foreignHook
+    $foreignOnlyFallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -BridgeEnabled '0' -HookState $null -SignalState $null
+    $foreignOnlyLines = @(Get-OutputLines $foreignOnlyFallback)
+    Assert-Fixture ($foreignOnlyLines.Count -eq 2 -and
+        ($foreignOnlyLines -join ' ') -notmatch 'foreign-agent-marker|subagents') `
+        'Hook fallback read activity from another session.'
+    [System.IO.File]::Delete($foreignHookStatePath)
 
     $hookOutcome = Get-FixtureHookState -WithActiveTool $false -Now $now
     $hookOutcome.lastTool = [ordered]@{
@@ -399,6 +793,47 @@ try {
     Assert-Fixture ($hookOutcomeLines[2] -notmatch '✓ Complete') `
         'Bridge completion duplicated the recent hook outcome.'
 
+    $endedHookAgent = Get-FixtureHookState -WithActiveTool $false -Now $now
+    $endedHookAgent.lastSubagent = [ordered]@{
+        matchKey = 'analysis'
+        status = 'complete'
+        completedAtMs = $now - 1000
+        durationMs = 4000
+    }
+    $endedHookOutput = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -BridgeEnabled '0' -HookState $endedHookAgent -SignalState $null
+    $endedHookLines = @(Get-OutputLines $endedHookOutput)
+    Assert-Fixture ($endedHookLines.Count -eq 3 -and
+        $endedHookLines[2] -match 'analysis ended' -and
+        $endedHookLines[2] -notmatch '✓|complete') `
+        'A subagent terminal was rendered as a success claim.'
+
+    $fleetWithHookOutcome = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $hookOutcome -SignalState $signalFleet
+    $fleetWithHookOutcomeLines = @(Get-OutputLines $fleetWithHookOutcome)
+    Assert-Fixture ($fleetWithHookOutcomeLines.Count -eq 3 -and
+        $fleetWithHookOutcomeLines[2] -match '2 subagents' -and
+        $fleetWithHookOutcomeLines[2] -match 'read') `
+        "Recent completed-tool history masked a fresh Fleet count: $($fleetWithHookOutcomeLines -join ' | ')"
+
+    $hookAgentToolOutcome = Get-FixtureHookState -WithActiveTool $false -Now $now
+    $hookAgentToolOutcome.lastTool = [ordered]@{
+        category = 'agent'
+        toolName = 'task'
+        target = 'agent work'
+        status = 'complete'
+        durationMs = 4000
+        completedAtMs = $now - 1000
+    }
+    $fleetWithAgentToolHistory = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState $hookAgentToolOutcome -SignalState $signalFleet
+    $fleetWithAgentToolLines = @(Get-OutputLines $fleetWithAgentToolHistory)
+    Assert-Fixture ($fleetWithAgentToolLines.Count -eq 3 -and
+        $fleetWithAgentToolLines[2] -match '2 subagents') `
+        'Agent tool history masked a fresh Fleet count.'
+    Assert-Fixture ($fleetWithAgentToolLines[2] -notmatch '✓ agent') `
+        'Agent tool history duplicated the lifecycle-confirmed Fleet count.'
+
     foreach ($fileMode in @('malformed', 'oversize')) {
         $fallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
             -HookState $activeHook -SignalState $signalPhase -SignalFile $fileMode
@@ -411,42 +846,55 @@ try {
             "$fileMode signal state rendered a recent AIC increase."
     }
 
-    $staleState = Get-FixtureSignalState -Phase 'running_tool' -Now ($now - 60000)
+    $staleState = Get-FixtureSignalState -Phase $null -RecentDelta $null `
+        -Now ($now - 60000) -ActiveSubagentCount 2
+    $staleState.phase = 'complete'
+    $staleState.phaseAtMs = $now - 60000
     $staleFallback = Invoke-StatuslineFixture -Width 120 -NoColor $true `
-        -HookState $activeHook -SignalState $staleState
+        -HookState $activeHook -SignalState $staleState -PreserveSignalTimestamp
     $staleLines = @(Get-OutputLines $staleFallback)
     Assert-Fixture ($staleLines.Count -eq 3 -and $staleLines[2] -match 'powershell') `
         'Stale state did not preserve hook activity.'
     Assert-Fixture ($staleLines[2] -notmatch 'Running tool') `
         'Stale phase was rendered.'
+    Assert-Fixture ($staleLines[2] -notmatch 'subagents') `
+        'Stale Fleet count was rendered.'
+    Assert-Fixture ($staleLines[2] -notmatch 'Assistant turn complete') `
+        'Stale root-turn completion was rendered.'
     Assert-Fixture ($staleLines[1] -notmatch 'recent \+') `
         'Stale AIC increase was rendered.'
 
     $duplicateSuppressed = Invoke-StatuslineFixture -Width 120 -NoColor $true `
-        -HookState $activeHook -SignalState $signalPhase
+        -HookState $activeHook -SignalState $signalFleet
     $duplicateLines = @(Get-OutputLines $duplicateSuppressed)
-    Assert-Fixture ($duplicateLines[2] -match 'powershell') `
-        'Hook-based tool ticker disappeared when both sources were active.'
-    Assert-Fixture ($duplicateLines[2] -notmatch 'Running tool') `
-        'Bridge phase duplicated active hook tool activity.'
+    Assert-Fixture ($duplicateLines[2] -match 'powershell' -and
+        $duplicateLines[2] -match '2 subagents') `
+        'Bridge Fleet count did not coexist with active hook tool activity.'
+    Assert-Fixture ($duplicateLines[2] -notmatch 'analysis') `
+        'Bridge Fleet count duplicated hook-based agent activity.'
 
     $completionNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $complete = Invoke-StatuslineFixture -Width 120 -NoColor $true `
         -HookState (Get-FixtureHookState -WithActiveTool $false -Now $completionNow) `
         -SignalState (Get-FixtureSignalState -Phase 'complete' -Now $completionNow)
     $completeLines = @(Get-OutputLines $complete)
-    Assert-Fixture ($completeLines.Count -eq 3 -and $completeLines[2] -match '✓ Complete') `
+    Assert-Fixture ($completeLines.Count -eq 3 -and
+        $completeLines[2] -match '✓ Assistant turn complete') `
         "A fresh completed phase was not displayed: $($completeLines -join ' | ')"
 
     Test-AtomicSignalSnapshots
     'StatuslineSignalFixturesPass=True'
     'Widths=80,120,160; ANSI/NO_COLOR=passed'
+    'FleetCounts=1/2,confirmed-zero,unknown,5-minute hook lease,matching-session fallback,concurrent-session isolation'
+    'TerminalLabel=ended-not-success; RootPhase=assistant-turn-complete'
     'IdleLines=2; ActiveLines=3; HookFallback=passed'
     'AbsentDisabledStaleMalformedOversize=passed'
 } finally {
     foreach ($path in @(
         $hookStatePath,
+        $foreignHookStatePath,
         $signalStatePath,
+        $foreignSignalStatePath,
         $atomicSignalStatePath,
         $atomicReadyPath,
         $atomicDonePath
