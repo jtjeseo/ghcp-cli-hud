@@ -8,7 +8,7 @@ User-level Windows statusline and optional activity-tracking hooks for GitHub Co
 - Line 2: session AIC total, token rate, cumulative input/output/cache totals, and line changes.
 - Line 3: active agents/tools and at most one recent outcome; omitted when there is no useful activity.
 
-The AIC value is the session total read from `ai_used.formatted`. The default HUD does not show a delta. An experimental, project-scoped bridge can opt in to a `recent +… AIU` checkpoint increase after a complete busy/idle interval; it is not labeled as a prompt or turn cost. Input and cache totals are not additive.
+The AIC value is the session total read from `ai_used.formatted`. The default HUD does not show a delta. An experimental bridge (project-scoped, or user-wide per "Default install for every session") can opt in to a `recent +… AIU` checkpoint increase after a complete busy/idle interval; it is not labeled as a prompt or turn cost. Input and cache totals are not additive. Token totals (`I(total)`, `O`, `C`) and line changes use a muted palette (ANSI 256: gray 244, added 108, removed 131), identically for zero and populated values; `NO_COLOR` disables all color. Only the renderer and hooks are needed for this default HUD; the bridge is an optional add-on.
 
 ## Files
 
@@ -38,6 +38,24 @@ The renderer reads the bridge file only when the same opt-in variable is `1`, th
 The AIC difference is computed only from a valid prior numeric checkpoint followed by idle, a non-overlapping interval of sequential root-turn starts/ends, a later numeric checkpoint, and a subsequent `session.idle`. Sequential internal turns in the same busy interval are grouped without using `turnId` as an identity. Per-call usage is ignored. The first complete interval after startup establishes a baseline and shows no difference. Missing or out-of-order boundaries, overlaps, interruption, resume/context clear, counter decrease, malformed state, or any unverified subagent event suppresses the value; subagent suppression lasts until a session resume or context clear resets the machine. Missing root event IDs, malformed checkpoints, permission boundaries, and tool-call correlation failures suppress AIC attribution without clearing otherwise matched subagent identities. The display label is `recent +… AIU`; it does not claim a unique prompt or turn cost.
 
 The bridge phase labels are `◐ Working`, `◐ Running tool`, and a brief `✓ Assistant turn complete`; idle has no line-3 phase label. The completion label describes the root assistant turn, not subagent success. The optional bridge label `◐ N subagents` is emitted only while matched `subagent.started` and terminal lifecycle events (`subagent.completed` or `subagent.failed`) support the count; each pair must agree on both the agent ID and spawning tool-call ID. A parent tool completion does not clear an agent, and a terminal event makes no task-success claim. Missing or mismatched IDs, duplicate starts, an open agent at session idle, or other ambiguous lifecycle data make the count unknown; an unclosed lifecycle is also demoted to unknown after the 5-minute lease. Resume/context clear resets prior tracking, while stale bridge state is rejected by the renderer. A fresh numeric bridge count is authoritative: positive counts replace hook-based agent displays, and confirmed zero suppresses hook-agent claims. Hook tools remain available alongside the count when width permits; the spawning `task` tool is labeled `task`, not `agent`. At width pressure, active tool activity outranks the agent count; completed-tool history is removed first and the count is dropped before active tool segments. A null, absent, malformed, disabled, or stale bridge falls back only to hook state matching the statusline session ID; those hook activity entries are also age-bounded. A hook subagent terminal is displayed as `ended` (or `failed` when explicitly reported), never as success based solely on `end_turn`.
+
+## Default install for every session
+
+Scope: your own Windows user profile only, for ordinary `copilot` launches. Nothing is installed in application repositories.
+
+1. **Renderer and hooks** — follow "Windows installation" or "Updating an existing installation". This alone gives the muted default HUD; when bridge state is absent, stale, or invalid the HUD falls back to hook-derived activity.
+2. **Bridge (optional, experimental)** — GitHub documents `%USERPROFILE%\.copilot\extensions\<name>\extension.mjs` as loading in all sessions when `"experimental": true` is set in `settings.json`. Copy `extension.mjs`, `state-machine.mjs`, and `state-store.mjs` from `.github\extensions\hud-signal-bridge` into `%USERPROFILE%\.copilot\extensions\hud-signal-bridge`, then set two user environment variables (new terminals only):
+
+   ```powershell
+   [Environment]::SetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE', '1', 'User')
+   [Environment]::SetEnvironmentVariable('COPILOT_HOME', "$env:USERPROFILE\.copilot", 'User')
+   ```
+
+   The bridge needs an explicit `COPILOT_HOME`; the value above is the CLI's default location. Diagnostics, raw capture, and AIC validation stay off unless their own variables are set (leave them unset). The bridge writes at most one bounded file per session under `.copilot\state\hud-signal-bridge`.
+3. **Verify** in a new terminal: run `copilot`, check `/env` shows `hud-signal-bridge` Running (from your user extensions, not Project), and confirm line 2 keeps the muted `I(total)/O/C` and `+/-` colors. After a reply, the HUD may show `recent +… AIU` (an interval increase, never a prompt price) and `✓ Assistant turn complete`; agent counts appear only while subagents run.
+4. **Rollback** — close Copilot CLI, delete `%USERPROFILE%\.copilot\extensions\hud-signal-bridge`, clear both variables with `SetEnvironmentVariable(name, $null, 'User')`, and restore backed-up renderer/hook files. The bridge can be disabled alone by clearing `COPILOT_HUD_SIGNAL_BRIDGE`.
+
+Already-running sessions and terminals opened before the variables were set keep their old environment; restart them. Extensions are experimental and run with your privileges; keep only trusted code there.
 
 ## Repo-scoped isolated HUD launch
 
@@ -132,6 +150,22 @@ Fleet validation is a separate isolated gate. Use one fresh disposable Git works
 6. After validation, rename `session-state-hooks.json.disabled` to `session-state-hooks.json`, then restart Copilot CLI.
 
 `config.json` is CLI-managed. User preferences belong in `settings.json`. This repository intentionally does not contain either file.
+
+### Updating an existing installation
+
+The renderer and hook handlers are plain files, so an update needs no settings change when `statusLine.command` already points at the installed `statusline.cmd`. Hook handlers are read on each event; the renderer runs on every refresh, so a new session or the next refresh picks it up.
+
+```powershell
+$base = Join-Path $env:USERPROFILE '.copilot'
+$backup = Join-Path $base ('backups\hud-install-' + (Get-Date -Format yyyyMMdd-HHmmss))
+New-Item -ItemType Directory -Path "$backup\statusline", "$backup\hooks" -Force | Out-Null
+Copy-Item "$base\statusline\statusline.*" "$backup\statusline\"
+Copy-Item "$base\hooks\state-hook.ps1" "$backup\hooks\"
+Copy-Item .\statusline\statusline.ps1 "$base\statusline\" -Force
+Copy-Item .\hooks\state-hook.ps1 "$base\hooks\" -Force
+```
+
+Rollback: close Copilot CLI and copy the backed-up files over the installed ones. Verify in a fresh session that line 2 ends with muted `I(total):… O:… C:… │ +…/-…` and that the bridge labels (`recent +… AIU`, `N subagents`) are absent unless you deliberately use the opt-in bridge launcher below.
 
 ## Validation and recovery
 
