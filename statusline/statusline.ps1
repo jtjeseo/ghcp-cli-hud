@@ -613,7 +613,8 @@ function Get-QuotaData {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
             if ((Get-Item -LiteralPath $path).Length -gt 65536) { continue }
             $candidate = [IO.File]::ReadAllText($path) | ConvertFrom-Json
-            if ($null -eq $candidate.updatedAt -or
+            if (-not (Test-HudSignalInteger $candidate.updatedAt) -or
+                [double]$candidate.updatedAt -gt $nowMs + 5000 -or
                 ($nowMs - [double]$candidate.updatedAt) -gt 604800000) { continue }
             if ($null -eq $data -or [double]$candidate.updatedAt -gt [double]$data.updatedAt) {
                 $data = $candidate
@@ -630,8 +631,14 @@ function Get-QuotaData {
     } | Sort-Object { [double]$_.entitlement } -Descending | Select-Object -First 1
     if ($null -eq $quota) { return $null }
 
-    $used = [double]$quota.used
-    $entitlement = [double]$quota.entitlement
+    $used = if ($quota.used -is [ValueType]) { ConvertTo-NullableNumber $quota.used } else { $null }
+    $entitlement = if ($quota.entitlement -is [ValueType]) {
+        ConvertTo-NullableNumber $quota.entitlement
+    } else { $null }
+    if ($null -eq $used -or $null -eq $entitlement) {
+        Write-QuotaEstimateWarning -CopilotHome $copilotHome -Reason 'state-unavailable'
+        return $null
+    }
     $days = $null
     $reset = [DateTimeOffset]::MinValue
     $resetText = if ($quota.resetDate -is [datetime]) {
@@ -668,20 +675,26 @@ function Get-QuotaData {
     $todayUsed = $null
     $todayBudget = $null
     $todayEstimated = $false
-    $sessionEstimate = 0.0
+    $accountEstimate = [pscustomobject]@{ Amount = 0.0; Complete = $false; Accepted = $false }
     try {
-        $sessionEstimate = Get-QuotaSessionEstimate -CopilotHome $copilotHome -Payload $Payload -Used $used
-    } catch { $sessionEstimate = 0.0 }
+        $period = if ($reset -ne [DateTimeOffset]::MinValue) {
+            $reset.UtcDateTime.ToString('yyyy-MM-dd')
+        } else { '' }
+        $accountEstimate = Get-QuotaAccountEstimate -CopilotHome $copilotHome `
+            -Payload $Payload -Used $used -Entitlement $entitlement -Period $period `
+            -SnapshotAt ([double]$data.updatedAt)
+    } catch { Write-QuotaEstimateWarning -CopilotHome $copilotHome -Reason 'state-unavailable' }
     try {
-        $baseline = Get-QuotaDayBaseline -CopilotHome $copilotHome -Used $used -Budget $perDay -ReadOnly:$stale
+        $baseline = Get-QuotaDayBaseline -CopilotHome $copilotHome -Used $used -Budget $perDay `
+            -ReadOnly:($stale -or $accountEstimate.Accepted -eq $false)
         if ($null -ne $baseline) {
-            $todayUsed = [math]::Max(0.0, $used - [double]$baseline.startUsed) + $sessionEstimate
-            $todayEstimated = $sessionEstimate -gt 0
+            $todayUsed = [math]::Max(0.0, $used - [double]$baseline.startUsed) + $accountEstimate.Amount
+            $todayEstimated = $accountEstimate.Amount -gt 0
             if ($null -ne $baseline.budget -and [double]$baseline.budget -gt 0) {
                 $todayBudget = [double]$baseline.budget
             }
         }
-    } catch {}
+    } catch { Write-QuotaEstimateWarning -CopilotHome $copilotHome -Reason 'state-unavailable' }
     return [pscustomobject]@{
         Used = $used
         Entitlement = $entitlement
@@ -692,58 +705,356 @@ function Get-QuotaData {
         TodayUsed = $todayUsed
         TodayBudget = $todayBudget
         TodayEstimated = $todayEstimated
+        TodayEstimateComplete = $accountEstimate.Complete
         Stale = $stale
         AgeMs = $ageMs
     }
 }
 
-# The plan counter only moves in coarse, delayed steps. Between steps, estimate
-# this session's unbilled usage as the session AIC growth since the counter last
-# moved; the estimate resets whenever the counter moves, so error never accumulates.
-function Get-QuotaSessionEstimate {
-    param([string]$CopilotHome, [AllowNull()][object]$Payload, [double]$Used)
+function Write-QuotaEstimateWarning {
+    param(
+        [string]$CopilotHome,
+        [ValidateSet('state-unavailable', 'state-rebased', 'rollup-incomplete', 'capacity', 'cleanup-unavailable')]
+        [string]$Reason
+    )
+    try {
+        $path = Join-Path (Join-Path $CopilotHome 'state') 'hud-quota-estimate-warning.log'
+        [IO.File]::WriteAllText($path, $Reason)
+    } catch {}
+}
 
-    $sessionId = Get-FirstValue -InputObject $Payload -Paths @('session_id')
-    if ($null -eq $sessionId) { return 0.0 }
-    $sessionId = [string]$sessionId
-    if ($sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$') { return 0.0 }
-    $nano = Get-FirstNumber -InputObject $Payload -Paths @('ai_used.total_nano_aiu')
-    if ($null -eq $nano -or $nano -lt 0) { return 0.0 }
-    $aic = [double]$nano / 1000000000.0
+function Test-LegacyQuotaEstimateRecord {
+    param([AllowNull()][object]$Record)
+
+    return $Record -is [Collections.IDictionary] -and $Record.Count -eq 2 -and
+        $Record.Contains('plan') -and $Record.Contains('aic') -and
+        $Record.plan -is [ValueType] -and $Record.aic -is [ValueType] -and
+        $null -ne (ConvertTo-NullableNumber $Record.plan) -and
+        $null -ne (ConvertTo-NullableNumber $Record.aic)
+}
+
+function Test-QuotaEstimateLedger {
+    param([AllowNull()][object]$Record)
+
+    if ($Record -isnot [Collections.IDictionary]) { return $false }
+    $keys = @('version', 'date', 'plan', 'period', 'entitlement', 'quotaAt', 'epoch', 'sessions', 'complete')
+    if ($Record.Count -ne $keys.Count -or
+        @($keys | Where-Object { -not $Record.Contains($_) }).Count -gt 0 -or
+        -not (Test-HudSignalInteger $Record.version) -or $Record.version -ne 2 -or
+        $Record.date -isnot [string] -or $Record.date -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or
+        $Record.period -isnot [string] -or
+        $Record.period -cnotmatch '^(?:\d{4}-\d{2}-\d{2})?$' -or
+        $Record.complete -isnot [bool] -or
+        $Record.epoch -isnot [string] -or $Record.epoch -cnotmatch '^[a-f0-9]{32}$' -or
+        -not (Test-HudSignalInteger $Record.quotaAt) -or
+        $Record.sessions -isnot [Collections.IDictionary] -or
+        $Record.sessions.Count -gt 64) { return $false }
+    $parsedDate = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact($Record.date, 'yyyy-MM-dd',
+        [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None,
+        [ref]$parsedDate) -or
+        ($Record.period -and -not [DateTime]::TryParseExact($Record.period, 'yyyy-MM-dd',
+            [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None,
+            [ref]$parsedDate))) { return $false }
+    foreach ($key in @('plan', 'entitlement')) {
+        if ($Record[$key] -isnot [ValueType] -or
+            $null -eq (ConvertTo-NullableNumber $Record[$key])) { return $false }
+    }
+    if ($Record.entitlement -le 0) { return $false }
+    foreach ($id in $Record.sessions.Keys) {
+        $entry = $Record.sessions[$id]
+        if ($id -isnot [string] -or $id -cnotmatch '^[A-Za-z0-9_-]{1,128}$' -or
+            $entry -isnot [Collections.IDictionary] -or $entry.Count -ne 2 -or
+            -not $entry.Contains('aic') -or -not $entry.Contains('latestAic') -or
+            $entry.aic -isnot [ValueType] -or $entry.latestAic -isnot [ValueType] -or
+            $null -eq (ConvertTo-NullableNumber $entry.aic) -or
+            $null -eq (ConvertTo-NullableNumber $entry.latestAic) -or
+            $entry.aic -gt $entry.latestAic -or $entry.latestAic -gt 9007199.254740991) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Write-QuotaEstimateRecord {
+    param([string]$Path, [object]$Record, [long]$MaxBytes)
+
+    if ([IO.Directory]::Exists($Path)) {
+        throw [IO.IOException]::new('Quota estimate destination is not a file')
+    }
+    $json = $Record | ConvertTo-Json -Depth 5 -Compress
+    if ([Text.Encoding]::UTF8.GetByteCount($json) -gt $MaxBytes) {
+        throw [IO.InvalidDataException]::new('Quota estimate record is oversized')
+    }
+    $temporary = "$Path.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temporary, $json)
+        Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+}
+
+function Test-QuotaPendingEstimateRecord {
+    param([AllowNull()][object]$Record)
+
+    return $Record -is [Collections.IDictionary] -and $Record.Count -eq 3 -and
+        $Record.Contains('version') -and $Record.Contains('epoch') -and $Record.Contains('nano') -and
+        (Test-HudSignalInteger $Record.version) -and $Record.version -eq 1 -and
+        $Record.epoch -is [string] -and $Record.epoch -cmatch '^[a-f0-9]{32}$' -and
+        (Test-HudSignalInteger $Record.nano)
+}
+
+function Write-QuotaPendingEstimate {
+    param([string]$Path, [string]$Epoch, [double]$Nano, [switch]$Reset)
+
+    $lock = $null
+    try {
+        $lock = [IO.File]::Open("$Path.lock", [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        if (-not $Reset -and [IO.File]::Exists($Path)) {
+            $previous = Read-QuotaEstimateRecord -Path $Path -MaxBytes 1024
+            if (-not (Test-QuotaPendingEstimateRecord $previous)) {
+                throw [IO.InvalidDataException]::new('Invalid pending quota estimate')
+            }
+            if ($previous.epoch -ceq $Epoch) {
+                $Nano = [math]::Max($Nano, [double]$previous.nano)
+            }
+        }
+        Write-QuotaEstimateRecord -Path $Path -MaxBytes 1024 `
+            -Record ([ordered]@{ version = 1; epoch = $Epoch; nano = $Nano })
+    } finally {
+        if ($null -ne $lock) { $lock.Dispose() }
+    }
+}
+
+function Merge-QuotaPendingEstimates {
+    param([string]$CopilotHome, [Collections.IDictionary]$Ledger)
 
     $directory = Join-Path $CopilotHome 'state'
-    $path = Join-Path $directory "hud-quota-est-$sessionId.json"
-    $existing = $null
-    try {
-        if ((Test-Path -LiteralPath $path -PathType Leaf) -and
-            (Get-Item -LiteralPath $path).Length -le 1024) {
-            $existing = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+    foreach ($id in $Ledger.sessions.Keys) {
+        $pendingPath = Join-Path $directory "hud-quota-pending-$($Ledger.date)-$id.json"
+        if (-not [IO.File]::Exists($pendingPath)) { continue }
+        try {
+            $pending = Read-QuotaEstimateRecord -Path $pendingPath -MaxBytes 1024
+            if (-not (Test-QuotaPendingEstimateRecord $pending)) {
+                throw [IO.InvalidDataException]::new('Invalid pending quota estimate')
+            }
+            if ($pending.epoch -ceq $Ledger.epoch) {
+                $entry = $Ledger.sessions[$id]
+                $entry.latestAic = [math]::Max([double]$entry.latestAic, [double]$pending.nano / 1e9)
+            }
+        } catch {
+            $Ledger.complete = $false
+            Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'rollup-incomplete'
         }
-    } catch { $existing = $null }
+    }
+}
 
-    if ($null -ne $existing -and $existing.plan -is [ValueType] -and
-        $existing.aic -is [ValueType] -and [double]$existing.plan -eq $Used -and
-        [double]$existing.aic -le $aic) {
-        return [math]::Max(0.0, $aic - [double]$existing.aic)
+function Remove-ExpiredQuotaPendingEstimates {
+    param([string]$CopilotHome, [DateTime]$Today)
+
+    $directory = Join-Path $CopilotHome 'state'
+    $cutoff = $Today.AddDays(-2).ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+    try {
+        $expired = @(Get-ChildItem -LiteralPath $directory -Filter 'hud-quota-pending-*.json*' -File `
+            -ErrorAction Stop | Where-Object {
+                $_.Name -cmatch '^hud-quota-pending-(\d{4}-\d{2}-\d{2})-[A-Za-z0-9_-]{1,128}\.json(?:\.lock|\.\d+\.[a-f0-9]{32}\.tmp)?$' -and
+                $Matches[1] -clt $cutoff
+            } | Select-Object -First 32)
+        foreach ($file in $expired) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop }
+    } catch { Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'cleanup-unavailable' }
+}
+
+function Read-QuotaEstimateRecord {
+    param([string]$Path, [long]$MaxBytes = 65536)
+
+    $stream = $null
+    try {
+        $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $length = $stream.Length
+        if ($length -le 0 -or $length -gt $MaxBytes) {
+            throw [IO.InvalidDataException]::new('Invalid quota estimate size')
+        }
+        $bytes = [byte[]]::new([int]$length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -le 0) { throw [IO.InvalidDataException]::new('Incomplete quota estimate read') }
+            $offset += $read
+        }
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes).TrimStart([char]0xFEFF)
+        return ($text | ConvertFrom-Json -AsHashtable -ErrorAction Stop)
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Test-QuotaEstimateCheckpointAhead {
+    param(
+        [Collections.IDictionary]$Record, [string]$Date, [double]$Used,
+        [string]$Period, [double]$Entitlement, [double]$SnapshotAt
+    )
+
+    return $Record.date -cgt $Date -or
+        (($Record.plan -ne $Used -or $Record.period -cne $Period -or
+            $Record.entitlement -ne $Entitlement) -and $SnapshotAt -lt $Record.quotaAt)
+}
+
+# All terminals reconcile the same ledger. A plan movement clears pending estimates
+# instead of guessing which sessions were billed; closed sessions remain included.
+function Get-QuotaAccountEstimate {
+    param(
+        [string]$CopilotHome, [AllowNull()][object]$Payload, [double]$Used,
+        [double]$Entitlement, [string]$Period, [double]$SnapshotAt,
+        [DateTime]$Today = [DateTime]::Today
+    )
+
+    $date = $Today.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+    $directory = Join-Path $CopilotHome 'state'
+    $path = Join-Path $directory 'hud-quota-estimates.json'
+    $complete = $true
+    if ($null -eq (ConvertTo-NullableNumber $Used) -or
+        $null -eq (ConvertTo-NullableNumber $Entitlement) -or $Entitlement -le 0 -or
+        -not (Test-HudSignalInteger $SnapshotAt)) {
+        Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-unavailable'
+        return [pscustomobject]@{ Amount = 0.0; Complete = $false; Accepted = $false }
+    }
+    $sessionId = Get-FirstValue -InputObject $Payload -Paths @('session_id')
+    $nano = Get-FirstValue -InputObject $Payload -Paths @('ai_used.total_nano_aiu')
+    $canObserve = $null -ne $nano -and $sessionId -is [string] -and
+        $sessionId -cmatch '^[A-Za-z0-9_-]{1,128}$' -and (Test-HudSignalInteger $nano)
+    if ($null -ne $nano -and -not $canObserve) {
+        $complete = $false
+        Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-unavailable'
     }
 
-    try {
-        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
-            [void](New-Item -ItemType Directory -Path $directory -Force)
+    if ($canObserve -and [IO.File]::Exists($path)) {
+        try {
+            $checkpoint = Read-QuotaEstimateRecord -Path $path
+            if ((Test-QuotaEstimateLedger $checkpoint) -and $checkpoint.date -ceq $date -and
+                $checkpoint.plan -eq $Used -and $checkpoint.period -ceq $Period -and
+                $checkpoint.entitlement -eq $Entitlement -and $checkpoint.sessions.Contains($sessionId)) {
+                $pendingPath = Join-Path $directory "hud-quota-pending-$date-$sessionId.json"
+                Write-QuotaPendingEstimate -Path $pendingPath -Epoch $checkpoint.epoch -Nano $nano
+            }
+        } catch {
+            $complete = $false
+            Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-unavailable'
         }
-        $temporary = "$path.$PID.tmp"
-        [IO.File]::WriteAllText($temporary,
-            ([pscustomobject]@{ plan = $Used; aic = $aic } | ConvertTo-Json -Compress))
-        Move-Item -LiteralPath $temporary -Destination $path -Force
-        $cutoff = [DateTime]::UtcNow.AddDays(-2)
-        Get-ChildItem -LiteralPath $directory -Filter 'hud-quota-est-*.json*' -File |
-            Where-Object { $_.LastWriteTimeUtc -lt $cutoff } |
-            Select-Object -First 32 |
-            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    $lock = $null
+    $record = $null
+    try {
+        [void][IO.Directory]::CreateDirectory($directory)
+        # No retry or wait on the render path; an exclusive handle dies with its process.
+        $lock = [IO.File]::Open("$path.lock", [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        if ([IO.Directory]::Exists($path)) {
+            throw [IO.IOException]::new('Quota estimate destination is not a file')
+        }
+        $initial = -not [IO.File]::Exists($path)
+        if (-not $initial) {
+            try {
+                $record = Read-QuotaEstimateRecord -Path $path
+                if (-not (Test-QuotaEstimateLedger $record)) {
+                    throw [IO.InvalidDataException]::new('Invalid quota estimate ledger')
+                }
+            } catch {
+                $record = $null
+                $complete = $false
+                Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-rebased'
+            }
+        }
+        if ($null -ne $record -and (Test-QuotaEstimateCheckpointAhead -Record $record `
+            -Date $date -Used $Used -Period $Period -Entitlement $Entitlement -SnapshotAt $SnapshotAt)) {
+            Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'rollup-incomplete'
+            return [pscustomobject]@{ Amount = 0.0; Complete = $false; Accepted = $false }
+        }
+        if ($null -eq $record -or $record.date -cne $date -or $record.plan -ne $Used -or
+            $record.period -cne $Period -or $record.entitlement -ne $Entitlement) {
+            $record = [ordered]@{
+                version = 2; date = $date; plan = $Used; period = $Period
+                entitlement = $Entitlement; quotaAt = $SnapshotAt
+                epoch = [guid]::NewGuid().ToString('N')
+                sessions = @{}; complete = $complete
+            }
+        }
+        $record.quotaAt = [math]::Max([double]$record.quotaAt, $SnapshotAt)
+        if ($canObserve) {
+            $aic = [double]$nano / 1000000000.0
+            if ($record.sessions.Contains($sessionId)) {
+                $entry = $record.sessions[$sessionId]
+                # Ignore regressed samples rather than counting the same growth twice.
+                $entry.latestAic = [math]::Max([double]$entry.latestAic, $aic)
+            } elseif ($record.sessions.Count -lt 64) {
+                $entry = [ordered]@{ aic = $aic; latestAic = $aic }
+                $legacyPath = Join-Path $directory "hud-quota-est-$sessionId.json"
+                if ($initial -and [IO.File]::Exists($legacyPath)) {
+                    try {
+                        $legacy = Read-QuotaEstimateRecord -Path $legacyPath -MaxBytes 2048
+                        if (-not (Test-LegacyQuotaEstimateRecord $legacy)) {
+                            throw [IO.InvalidDataException]::new('Invalid legacy quota estimate')
+                        }
+                        if ($legacy.plan -eq $Used -and $legacy.aic -le $aic -and
+                            [IO.File]::GetLastWriteTime($legacyPath).Date -eq $Today.Date) {
+                            $entry.aic = [double]$legacy.aic
+                        }
+                    } catch {
+                        $record.complete = $false
+                        Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-rebased'
+                    }
+                }
+                $record.sessions[$sessionId] = $entry
+                try {
+                    $pendingPath = Join-Path $directory "hud-quota-pending-$date-$sessionId.json"
+                    Write-QuotaPendingEstimate -Path $pendingPath -Epoch $record.epoch -Nano $nano -Reset
+                } catch {
+                    $complete = $false
+                    Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-unavailable'
+                }
+            } else {
+                $record.complete = $false
+                Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'capacity'
+            }
+        }
+        Merge-QuotaPendingEstimates -CopilotHome $CopilotHome -Ledger $record
+        if (-not $initial -or $null -ne $nano) {
+            Write-QuotaEstimateRecord -Path $path -Record $record -MaxBytes 65536
+            Remove-ExpiredQuotaPendingEstimates -CopilotHome $CopilotHome -Today $Today
+        }
     } catch {
-        Remove-Item -LiteralPath "$path.$PID.tmp" -Force -ErrorAction SilentlyContinue
+        $complete = $false
+        Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-unavailable'
+        $record = $null
+        if ([IO.File]::Exists($path)) {
+            try {
+                $cached = Read-QuotaEstimateRecord -Path $path
+                if (Test-QuotaEstimateLedger $cached) {
+                    if (Test-QuotaEstimateCheckpointAhead -Record $cached -Date $date `
+                        -Used $Used -Period $Period -Entitlement $Entitlement -SnapshotAt $SnapshotAt) {
+                        return [pscustomobject]@{ Amount = 0.0; Complete = $false; Accepted = $false }
+                    }
+                    $record = $cached
+                    Merge-QuotaPendingEstimates -CopilotHome $CopilotHome -Ledger $record
+                }
+            } catch { Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'rollup-incomplete' }
+        }
+    } finally {
+        if ($null -ne $lock) { $lock.Dispose() }
     }
-    return 0.0
+    $amount = 0.0
+    if ($null -ne $record -and $record.date -ceq $date -and $record.plan -eq $Used -and
+        $record.period -ceq $Period -and $record.entitlement -eq $Entitlement) {
+        foreach ($entry in $record.sessions.Values) {
+            $amount += [double]$entry.latestAic - [double]$entry.aic
+        }
+        $complete = $complete -and $record.complete
+    } else {
+        $complete = $false
+    }
+    return [pscustomobject]@{ Amount = $amount; Complete = $complete; Accepted = ($null -ne $record) }
 }
 
 # Account-wide daily baseline: usage and budget captured at the first render of
@@ -751,16 +1062,51 @@ function Get-QuotaSessionEstimate {
 function Get-QuotaDayBaseline {
     param([string]$CopilotHome, [double]$Used, [AllowNull()][object]$Budget, [switch]$ReadOnly)
 
+    if ($ReadOnly) {
+        return (Get-QuotaDayBaselineCore -CopilotHome $CopilotHome -Used $Used -Budget $Budget -ReadOnly)
+    }
+    $lock = $null
+    try {
+        $directory = Join-Path $CopilotHome 'state'
+        [void][IO.Directory]::CreateDirectory($directory)
+        $lock = [IO.File]::Open((Join-Path $directory 'hud-quota-day.json.lock'),
+            [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        return (Get-QuotaDayBaselineCore -CopilotHome $CopilotHome -Used $Used -Budget $Budget)
+    } catch [IO.IOException] {
+        Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-unavailable'
+        return (Get-QuotaDayBaselineCore -CopilotHome $CopilotHome -Used $Used -Budget $Budget -ReadOnly)
+    } finally {
+        if ($null -ne $lock) { $lock.Dispose() }
+    }
+}
+
+function Get-QuotaDayBaselineCore {
+    param([string]$CopilotHome, [double]$Used, [AllowNull()][object]$Budget, [switch]$ReadOnly)
+
     $directory = Join-Path $CopilotHome 'state'
     $path = Join-Path $directory 'hud-quota-day.json'
+    if ([IO.Directory]::Exists($path)) {
+        throw [IO.IOException]::new('Daily quota baseline destination is not a file')
+    }
     $today = [DateTime]::Today.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
     $existing = $null
     try {
-        if ((Test-Path -LiteralPath $path -PathType Leaf) -and
-            (Get-Item -LiteralPath $path).Length -le 4096) {
-            $existing = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+        if ([IO.File]::Exists($path)) {
+            $existing = Read-QuotaEstimateRecord -Path $path -MaxBytes 4096
+            if ($existing.startUsed -isnot [ValueType] -or
+                $null -eq (ConvertTo-NullableNumber $existing.startUsed) -or
+                $existing.date -isnot [string] -or
+                $existing.date -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or
+                ($null -ne $existing.budget -and
+                    ($existing.budget -isnot [ValueType] -or
+                        $null -eq (ConvertTo-NullableNumber $existing.budget)))) {
+                throw [IO.InvalidDataException]::new('Invalid daily quota baseline')
+            }
         }
-    } catch { $existing = $null }
+    } catch {
+        Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-unavailable'
+        throw
+    }
     if ($ReadOnly) {
         if ($null -ne $existing -and [string]$existing.date -ceq $today -and
             $existing.startUsed -is [ValueType]) {
@@ -787,6 +1133,8 @@ function Get-QuotaDayBaseline {
         Move-Item -LiteralPath $temporary -Destination $path -Force
     } catch {
         Remove-Item -LiteralPath "$path.$PID.tmp" -Force -ErrorAction SilentlyContinue
+        Write-QuotaEstimateWarning -CopilotHome $CopilotHome -Reason 'state-unavailable'
+        throw
     }
     return $record
 }
@@ -841,13 +1189,14 @@ function Get-QuotaPaceSegment {
         $ratio = 100.0 * $spent / $limit
         $spentColor = if ($ratio -ge 100) {
             $script:Bright + $script:Colors.red
-        } elseif ($ratio -ge 75) {
+        } elseif ($ratio -ge 75 -or $QuotaData.TodayEstimateComplete -eq $false) {
             $script:Bright + $script:Colors.yellow
         } else {
             $script:Dim
         }
         $approx = if ($QuotaData.TodayEstimated) { '~' } else { '' }
-        $budget = '⚡' + $spentColor + $approx + (Format-Count ([math]::Floor($spent))) + $script:Reset +
+        $unknown = if ($QuotaData.TodayEstimateComplete -eq $false) { '+?' } else { '' }
+        $budget = '⚡' + $spentColor + $approx + (Format-Count ([math]::Floor($spent))) + $unknown + $script:Reset +
             $script:Dim + '/' + (Format-Count ([math]::Floor($limit))) + ' today' + $script:Reset
     } elseif ($null -ne $QuotaData.PerWorkday) {
         $budget = '⚡' + $script:Dim + (Format-Count ([math]::Floor($QuotaData.PerWorkday))) + '/workday' + $script:Reset

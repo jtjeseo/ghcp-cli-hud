@@ -901,6 +901,71 @@ try {
     Assert-Fixture ((@(Get-OutputLines $staleOut))[1] -notmatch 'recent') `
         'Placeholder appeared for a stale bridge snapshot.'
 
+    $reliabilityProbe = @'
+import { pathToFileURL } from "node:url";
+const { createSignalMachine } = await import(pathToFileURL(process.argv[1]));
+const sessionId = process.argv[2];
+const now = Date.now();
+let eventId = 0;
+function sample(start, parallel) {
+    const machine = createSignalMachine(sessionId, start);
+    const send = (type, offset, data = {}) => machine.observe({
+        id: `reliability-${++eventId}`, type,
+        timestamp: new Date(start + offset).toISOString(), data
+    });
+    send("session.usage_checkpoint", 1, { totalNanoAiu: 100_000_000_000 });
+    send("session.idle", 2);
+    send("assistant.turn_start", 3);
+    if (parallel) {
+        send("tool.execution_start", 4, { toolCallId: "first" });
+        send("tool.execution_start", 5, { toolCallId: "second" });
+        send("tool.execution_complete", 6, { toolCallId: "second" });
+        send("tool.execution_complete", 7, { toolCallId: "first" });
+    } else {
+        send("assistant.turn_start", 4);
+    }
+    send("assistant.turn_end", 8);
+    send("session.usage_checkpoint", 9, { totalNanoAiu: 106_000_000_000 });
+    send("session.idle", 10);
+    return machine;
+}
+const parallel = sample(now - 20, true);
+const expired = sample(now - 130_020, true);
+expired.heartbeat(now);
+const suppressed = sample(now - 130_020, false);
+suppressed.heartbeat(now);
+const idle = createSignalMachine(sessionId, now - 300_000);
+idle.heartbeat(now);
+console.log(JSON.stringify({
+    parallel: parallel.snapshot(), expired: expired.snapshot(),
+    suppressed: suppressed.snapshot(), idle: idle.snapshot()
+}));
+'@
+    $machinePath = Join-Path $repositoryRoot '.github\extensions\hud-signal-bridge\state-machine.mjs'
+    $reliabilityJson = & node --input-type=module -e $reliabilityProbe $machinePath $sessionId
+    Assert-Fixture ($LASTEXITCODE -eq 0) 'Bridge reliability probe did not complete.'
+    $reliabilityStates = ($reliabilityJson -join "`n") | ConvertFrom-Json -AsHashtable
+    foreach ($width in @(80, 120, 160)) {
+        foreach ($case in @('parallel', 'expired', 'suppressed', 'idle')) {
+            $reliabilityOut = Invoke-StatuslineFixture -Width $width -NoColor $true `
+                -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) `
+                -SignalState $reliabilityStates[$case]
+            $reliabilityLines = @(Get-OutputLines $reliabilityOut)
+            if ($case -ceq 'parallel') {
+                Assert-Fixture ($reliabilityLines[1] -match 'recent \+6\.00 AIU') `
+                    "Clean parallel-tool increase was not rendered at width ${width}: $reliabilityOut"
+            } else {
+                Assert-Fixture ($reliabilityLines[1] -match "recent $([char]0x2014)" -and
+                    $reliabilityLines[1] -notmatch 'recent \+|\(overlap\)') `
+                    "Idle/expired state lost its neutral placeholder at width ${width}: $reliabilityOut"
+                Assert-Fixture ($reliabilityLines.Count -eq 2) `
+                    "Idle/expired state fabricated an activity line at width ${width}: $reliabilityOut"
+            }
+            Assert-Fixture (@($reliabilityLines | Where-Object { $_.Length -gt $width }).Count -eq 0) `
+                "Reliability state exceeded width ${width}: $reliabilityOut"
+        }
+    }
+
     $suppressed = Get-FixtureSignalState -Phase $null -RecentDelta $null -Now $placeholderNow
     $suppressed['recentAtMs'] = $placeholderNow - 1000
     $suppressed['recentSuppressedReason'] = 'overlap'
@@ -953,6 +1018,7 @@ try {
     'StatuslineSignalFixturesPass=True'
     'Widths=80,120,160; ANSI/NO_COLOR=passed'
     'RecentPlaceholder=fresh-bridge-only; UnknownOutcome=neutral-ended'
+    'RecentReliability=parallel-tools:+6.00-AIU; idle/expired-value/expired-reason:neutral-placeholder; Widths=80,120,160'
     'FleetCounts=1/2,confirmed-zero,unknown,5-minute hook lease,matching-session fallback,concurrent-session isolation'
     'TerminalLabel=ended-not-success; RootPhase=assistant-turn-complete'
     'IdleLines=2; ActiveLines=3; HookFallback=passed'

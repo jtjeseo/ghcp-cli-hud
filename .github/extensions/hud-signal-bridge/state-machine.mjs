@@ -220,6 +220,19 @@ export function createSignalMachine(
         output.recentSuppressedReason = null;
     }
 
+    function invalidateSubagentAttribution() {
+        unverifiedSubagentActivity = true;
+        if (interval !== null) {
+            interval.ambiguous = true;
+            interval.suppressionReason ??=
+                "unverified-subagent-attribution";
+            interval.unverifiedSubagentActivity = true;
+        }
+        baselineTotalNanoAiu = null;
+        pendingBaseline = null;
+        clearRecent();
+    }
+
     function enqueueAicValidation({
         reason,
         validity = "suppressed",
@@ -294,10 +307,14 @@ export function createSignalMachine(
         });
     }
 
+    function updateFreshness(timestampMs) {
+        output.updatedAtMs = Math.max(output.updatedAtMs, timestampMs);
+    }
+
     function setPhase(phase, timestampMs) {
         output.phase = phase;
         output.phaseAtMs = phase === null ? null : timestampMs;
-        output.updatedAtMs = timestampMs;
+        updateFreshness(timestampMs);
     }
 
     function enqueueSubagentDiagnostic(diagnostic) {
@@ -497,7 +514,7 @@ export function createSignalMachine(
                 timestampMs
             );
             confirmedZeroUntilMs = null;
-            output.updatedAtMs = timestampMs;
+            updateFreshness(timestampMs);
             changed = true;
         }
         return changed;
@@ -642,17 +659,16 @@ export function createSignalMachine(
             ? event.data
             : {};
 
+        if (event.type.startsWith("tool.execution_") &&
+            [event.agentId, event.agentRef, data.parentToolCallId,
+                event.parentToolCallRef].some(
+                (value) => value !== undefined && value !== null
+            )) {
+            invalidateSubagentAttribution();
+        }
+
         if (event.type.startsWith("subagent.")) {
-            unverifiedSubagentActivity = true;
-            if (interval !== null) {
-                interval.ambiguous = true;
-                interval.suppressionReason ??=
-                    "unverified-subagent-attribution";
-                interval.unverifiedSubagentActivity = true;
-            }
-            baselineTotalNanoAiu = null;
-            pendingBaseline = null;
-            clearRecent();
+            invalidateSubagentAttribution();
 
             if (subagentTrackingUnknown) {
                 setPhase(output.phase, timestampMs);
@@ -787,11 +803,6 @@ export function createSignalMachine(
                     );
                     return true;
                 }
-                if (interval.activeToolCalls.size > 0) {
-                    interval.ambiguous = true;
-                    interval.overlapObserved = true;
-                    interval.suppressionReason ??= "overlapping-tools";
-                }
                 interval.activeToolCalls.add(toolCallId);
                 setPhase("running_tool", timestampMs);
                 return true;
@@ -838,7 +849,12 @@ export function createSignalMachine(
                     return true;
                 }
                 interval.activeToolCalls.delete(toolCallId);
-                setPhase("working", timestampMs);
+                setPhase(
+                    interval.activeToolCalls.size > 0
+                        ? "running_tool"
+                        : "working",
+                    timestampMs
+                );
                 return true;
             }
 
@@ -893,7 +909,7 @@ export function createSignalMachine(
                         pendingBaselineAmbiguous = true;
                     }
                     pendingBaseline = checkpoint;
-                    output.updatedAtMs = timestampMs;
+                    updateFreshness(timestampMs);
                     return true;
                 }
                 if (interval.pendingCheckpoint !== null) {
@@ -910,7 +926,7 @@ export function createSignalMachine(
                             : "checkpoint-before-turn-end";
                 }
                 interval.pendingCheckpoint = checkpoint;
-                output.updatedAtMs = timestampMs;
+                updateFreshness(timestampMs);
                 return true;
             }
 
@@ -1031,7 +1047,7 @@ export function createSignalMachine(
                     interval.ambiguous = true;
                     interval.suppressionReason ??= "incomplete-turns";
                 }
-                output.updatedAtMs = timestampMs;
+                updateFreshness(timestampMs);
                 return true;
             }
 
@@ -1045,43 +1061,30 @@ export function createSignalMachine(
             }
 
             default:
-                output.updatedAtMs = timestampMs;
+                updateFreshness(timestampMs);
                 return true;
         }
     }
 
     function heartbeat(nowMs = Date.now()) {
-        if (!safeInteger(nowMs)) {
+        if (!safeInteger(nowMs) || nowMs < output.updatedAtMs) {
             return false;
         }
 
-        let changed = expireSubagentClaims(nowMs);
-        const wasLive = interval !== null ||
-            output.recentAtMs !== null ||
-            output.phase === "complete" ||
-            output.activeSubagentCount > 0 ||
-            (output.activeSubagentCount === 0 &&
-                confirmedZeroUntilMs !== null &&
-                nowMs <= confirmedZeroUntilMs);
+        expireSubagentClaims(nowMs);
         if (output.recentAtMs !== null &&
             nowMs - output.recentAtMs > RECENT_DELTA_TTL_MS) {
             clearRecent();
-            changed = true;
         }
         if (output.phase === "complete" && output.phaseAtMs !== null &&
             nowMs - output.phaseAtMs > COMPLETE_PHASE_TTL_MS) {
             output.phase = "idle";
             output.phaseAtMs = nowMs;
-            changed = true;
         }
 
-        if (wasLive || interval !== null || output.recentAtMs !== null ||
-            output.phase === "complete" ||
-            output.activeSubagentCount > 0) {
-            output.updatedAtMs = nowMs;
-            changed = true;
-        }
-        return changed;
+        // Freshness tracks observer liveness, not whether a usage value exists.
+        updateFreshness(nowMs);
+        return true;
     }
 
     function snapshot() {

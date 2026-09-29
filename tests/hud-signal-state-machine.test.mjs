@@ -1186,7 +1186,8 @@ test("retains a confirmed zero briefly, then expires it to unknown", () => {
     assert.equal(machine.snapshot().activeSubagentCount, 0);
     assert.equal(machine.heartbeat(startedAt + 300_021), true);
     assert.equal(machine.snapshot().activeSubagentCount, null);
-    assert.equal(machine.heartbeat(startedAt + 300_022), false);
+    assert.equal(machine.heartbeat(startedAt + 300_022), true);
+    assert.equal(machine.snapshot().updatedAtMs, startedAt + 300_022);
 });
 
 test("keeps root turn completion distinct from an unknown subagent terminal", () => {

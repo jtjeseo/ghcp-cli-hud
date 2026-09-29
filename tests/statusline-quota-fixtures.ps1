@@ -84,6 +84,14 @@ try {
     Assert-Quota ((Render $true) -notmatch 'Quota') 'malformed quota file was shown'
     Write-Quota 0 0 0 '{"updatedAt":1,"quotas":null}'
     Assert-Quota ((Render $true) -notmatch 'Quota') 'null quotas were shown'
+    $dayPath = Join-Path (Join-Path $home_ 'state') 'hud-quota-day.json'
+    $baselineHash = (Get-FileHash -LiteralPath $dayPath).Hash
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Write-Quota 0 0 0 ('{"updatedAt":' + $nowMs +
+        ',"quotas":[{"unlimited":false,"used":null,"entitlement":100}]}')
+    Assert-Quota ((Render $true) -notmatch 'Quota') 'null plan usage was interpreted as a quota reset'
+    Assert-Quota ((Get-FileHash -LiteralPath $dayPath).Hash -ceq $baselineHash) `
+        'null plan usage rewrote the fixed daily baseline'
     Remove-Item -LiteralPath (Join-Path $home_ 'state') -Recurse -Force -ErrorAction SilentlyContinue
     $bridgeDir = Join-Path (Join-Path $home_ 'state') 'hud-signal-bridge'
     New-Item -ItemType Directory -Path $bridgeDir -Force | Out-Null
@@ -134,39 +142,67 @@ try {
     Assert-Quota ($plain -match '⚡~145/100 today') 'session estimate did not restart after the plan counter moved'
 
     $plain = Render $true '{"session_id":"s1"}'
-    Assert-Quota ($plain -match '⚡140/100 today' -and $plain -notmatch '⚡~') 'payload without ai_used added a session estimate'
+    Assert-Quota ($plain -match '⚡~145/100 today') 'payload without ai_used lost previously observed account usage'
 
-    $s1EstimatePath = Join-Path $stateDir 'hud-quota-est-s1.json'
-    $s2EstimatePath = Join-Path $stateDir 'hud-quota-est-s2.json'
+    $ledgerPath = Join-Path $stateDir 'hud-quota-estimates.json'
     Write-SessionQuota 1140
     $plain = Render $true '{"session_id":"s2","ai_used":{"total_nano_aiu":260000000000}}'
-    Assert-Quota ($plain -match '⚡140/100 today' -and $plain -notmatch '⚡~') 'a new session reused another session estimate'
-    Assert-Quota ((Test-Path -LiteralPath $s1EstimatePath -PathType Leaf) -and
-        (Test-Path -LiteralPath $s2EstimatePath -PathType Leaf)) 'session estimate files were not kept separate'
-    $s1Estimate = [IO.File]::ReadAllText($s1EstimatePath) | ConvertFrom-Json
-    $s2Estimate = [IO.File]::ReadAllText($s2EstimatePath) | ConvertFrom-Json
-    Assert-Quota ([double]$s1Estimate.plan -eq 1140 -and [double]$s1Estimate.aic -eq 220) 's1 estimate file was changed by s2'
-    Assert-Quota ([double]$s2Estimate.plan -eq 1140 -and [double]$s2Estimate.aic -eq 260) 's2 estimate file did not store its own baseline'
+    Assert-Quota ($plain -match '⚡~145/100 today') 'a new terminal did not display the shared estimate'
+    $ledger = [IO.File]::ReadAllText($ledgerPath) | ConvertFrom-Json
+    Assert-Quota ([double]$ledger.sessions.s1.aic -eq 220 -and
+        [double]$ledger.sessions.s1.latestAic -eq 225) 's2 changed the s1 baseline or high-water mark'
+    Assert-Quota ([double]$ledger.sessions.s2.aic -eq 260) 's2 did not store its own baseline'
+    $plain = Render $true '{"session_id":"s2","ai_used":{"total_nano_aiu":262000000000}}'
+    Assert-Quota ($plain -match '⚡~147/100 today') 'usage from two terminals was not summed'
+    foreach ($repeat in 1, 2) {
+        $plain = Render $true '{"session_id":"s1","ai_used":{"total_nano_aiu":225000000000}}'
+        Assert-Quota ($plain -match '⚡~147/100 today') 'switching terminals changed or duplicated account usage'
+    }
+    foreach ($width in 80, 120, 160) {
+        foreach ($noColor in $true, $false) {
+            $payload = '{"session_id":"s1","terminal_width":' + $width +
+                ',"ai_used":{"total_nano_aiu":225000000000}}'
+            $rendered = Render $noColor $payload
+            $visible = [regex]::Replace($rendered, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+            Assert-Quota ($visible -match '⚡~147/100 today') "shared meter disappeared at width $width"
+            Assert-Quota (@($visible -split "`r?`n" | Where-Object { $_.Length -gt $width }).Count -eq 0) `
+                "shared quota wrapped at width $width"
+        }
+    }
 
     Write-SessionQuota 1140
     $plain = Render $true '{"session_id":"s1","ai_used":{"total_nano_aiu":210000000000}}'
-    Assert-Quota ($plain -match '⚡140/100 today' -and $plain -notmatch '⚡~') 'a decreasing session counter produced an estimate'
-    $s1Estimate = [IO.File]::ReadAllText($s1EstimatePath) | ConvertFrom-Json
-    Assert-Quota ([double]$s1Estimate.plan -eq 1140 -and [double]$s1Estimate.aic -eq 210) 'decreasing session counter was not re-baselined'
+    Assert-Quota ($plain -match '⚡~147/100 today') 'a regressed sample erased observed usage'
+    $ledger = [IO.File]::ReadAllText($ledgerPath) | ConvertFrom-Json
+    Assert-Quota ([double]$ledger.sessions.s1.latestAic -eq 225) 'a regressed sample moved the high-water mark backward'
     Write-SessionQuota 1140
     $plain = Render $true '{"session_id":"s1","ai_used":{"total_nano_aiu":212000000000}}'
-    Assert-Quota ($plain -match '⚡~142/100 today') 'session estimate did not grow from the decreased counter baseline'
+    Assert-Quota ($plain -match '⚡~147/100 today') 'recovering from a regressed sample counted growth twice'
+    $plain = Render $true '{"session_id":"s1","ai_used":{"total_nano_aiu":227000000000}}'
+    Assert-Quota ($plain -match '⚡~149/100 today') 'new growth past the high-water mark was not counted'
 
     $s3EstimatePath = Join-Path $stateDir 'hud-quota-est-s3.json'
     [IO.File]::WriteAllText($s3EstimatePath, '{bad')
     Write-SessionQuota 1140
     $plain = Render $true '{"session_id":"s3","ai_used":{"total_nano_aiu":300000000000}}'
-    Assert-Quota ($plain -match '⚡140/100 today' -and $plain -notmatch '⚡~') 'malformed session estimate file did not recover cleanly'
-    Assert-Quota ($plain -notmatch "`e") 'NO_COLOR emitted escapes while recovering a malformed estimate file'
-    $s3Estimate = [IO.File]::ReadAllText($s3EstimatePath) | ConvertFrom-Json
-    Assert-Quota ([double]$s3Estimate.plan -eq 1140 -and [double]$s3Estimate.aic -eq 300) 'malformed session estimate file was not re-baselined'
+    Assert-Quota ($plain -match '⚡~149/100 today') 'an obsolete legacy file affected the active shared ledger'
+    $ledger = [IO.File]::ReadAllText($ledgerPath) | ConvertFrom-Json
+    Assert-Quota ([double]$ledger.sessions.s3.aic -eq 300) 'new session baseline was not recorded'
+    [IO.File]::WriteAllText($ledgerPath, '{bad')
+    $plain = Render $true '{"session_id":"s3","ai_used":{"total_nano_aiu":305000000000}}'
+    Assert-Quota ($plain -match '⚡140\+\?/100 today') 'corrupt accounting silently appeared complete'
+    $plain = Render $true '{"session_id":"s3","ai_used":{"total_nano_aiu":307000000000}}'
+    Assert-Quota ($plain -match '⚡~142\+\?/100 today') 'recovered accounting hid its missing history'
+    $plain = Render $true '{"session_id":"s3","ai_used":{"total_nano_aiu":308000000000}}'
+    Assert-Quota ($plain -match '⚡~143\+\?/100 today') 'partial recovered growth was not marked explicitly'
+    Assert-Quota ([IO.File]::ReadAllText((Join-Path $stateDir 'hud-quota-estimate-warning.log')) -eq 'state-rebased') `
+        'accounting recovery did not write a sanitized local marker'
+    Write-SessionQuota 1210
+    $plain = Render $true '{"session_id":"s3","ai_used":{"total_nano_aiu":310000000000}}'
+    Assert-Quota ($plain -match '⚡210/100 today' -and $plain -notmatch '⚡~|\+\?') `
+        'a confirmed plan movement did not clear partial pending accounting'
 
-    'SessionEstimate=plan-move-reset,growth,no-ai,sessions-isolated,counter-decrease-rebaseline,malformed-recovery,NO_COLOR,no-errors'
+    'AccountEstimate=two-terminal-rollup,repeat-dedup,no-ai,high-water,plan-reconcile,explicit-partial-recovery,NO_COLOR,no-errors'
     'DayMeter=bridge-preferred,fixed-budget,yellow,red,reset-rebaseline'
     'Quota=hidden-when-missing/week-old/past-period/malformed/null; stale=aged-tag,read-only-baseline; thresholds=cyan,yellow,red; NO_COLOR=plain'
 } finally {

@@ -179,6 +179,7 @@ function Set-FixtureBridgeRecent {
     $bridge.updatedAtMs = $time
     $bridge.phaseAtMs = $time
     $bridge.recentIncreaseNanoAiu = $RecentIncreaseNanoAiu
+    $bridge.recentSuppressedReason = $null
     $bridge.recentAtMs = if ($null -eq $RecentIncreaseNanoAiu) {
         $null
     } else {
@@ -238,6 +239,7 @@ try {
         phaseAtMs = $now
         recentIncreaseNanoAiu = 6390000000
         recentAtMs = $now
+        recentSuppressedReason = $null
         activeSubagentCount = 0
     }
     $validOrder = [ordered]@{
@@ -294,6 +296,20 @@ try {
     Assert-Fixture (-not $validOutput.Text.Contains($copilotHomeFixture)) `
         'The inspector printed a COPILOT_HOME path.'
 
+    $legacyBridge = [ordered]@{}
+    foreach ($key in $bridge.Keys) {
+        if ($key -cne 'recentSuppressedReason') { $legacyBridge[$key] = $bridge[$key] }
+    }
+    Write-FixtureJson -Path $bridgePath -Value $legacyBridge
+    Assert-Fixture ((Invoke-FixtureInspector).ExitCode -eq 0) `
+        'The inspector rejected a legacy bridge snapshot.'
+    $bridge.recentSuppressedReason = 'overlap'
+    Write-FixtureJson -Path $bridgePath -Value $bridge
+    Assert-Fixture ((Invoke-FixtureInspector).ExitCode -ne 0) `
+        'The inspector accepted both a delta and a suppression reason.'
+    $bridge.recentSuppressedReason = $null
+    Write-FixtureJson -Path $bridgePath -Value $bridge
+
     $validation.eventOrder.rootTurnCountCapped = $true
     Write-FixtureJson -Path $validationPath -Value $validation
     $cappedOutput = Invoke-FixtureInspector
@@ -303,7 +319,8 @@ try {
     Write-FixtureJson -Path $validationPath -Value $validation
 
     $bridge.recentIncreaseNanoAiu = $null
-    $bridge.recentAtMs = $null
+    $bridge.recentAtMs = $now
+    $bridge.recentSuppressedReason = 'interrupted'
     $validation.validity = 'suppressed'
     $validation.reason = 'interruption'
     $validation.baselineNanoAiu = 100
@@ -342,6 +359,18 @@ try {
         'The suppressed interval retained a displayable increase.'
     Assert-Fixture ($suppressedOutput.Text.Contains('matchesBridgeRecentValue=False')) `
         'Two null recent values were incorrectly treated as a match.'
+
+    $bridge.recentSuppressedReason = 'unapproved-text'
+    Write-FixtureJson -Path $bridgePath -Value $bridge
+    Assert-Fixture ((Invoke-FixtureInspector).ExitCode -ne 0) `
+        'The inspector accepted an unapproved suppression reason.'
+    $bridge.recentSuppressedReason = 'interrupted'
+    $bridge.recentAtMs = $null
+    Write-FixtureJson -Path $bridgePath -Value $bridge
+    Assert-Fixture ((Invoke-FixtureInspector).ExitCode -ne 0) `
+        'The inspector accepted a suppression reason without a timestamp.'
+    $bridge.recentSuppressedReason = $null
+    Write-FixtureJson -Path $bridgePath -Value $bridge
 
     $baselineRecord = New-FixtureBaselineRecord
     $observer = Start-FixtureObserverAtBaseline -BaselineRecord $baselineRecord

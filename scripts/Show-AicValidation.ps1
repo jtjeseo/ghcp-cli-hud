@@ -227,7 +227,8 @@ $requiredBridgeKeys = @(
     'recentAtMs',
     'activeSubagentCount'
 )
-if ($bridgeKeys.Count -ne $requiredBridgeKeys.Count -or
+$allowedBridgeKeys = $requiredBridgeKeys + @('recentSuppressedReason')
+if (@($bridgeKeys | Where-Object { $_ -cnotin $allowedBridgeKeys }).Count -gt 0 -or
     @($requiredBridgeKeys | Where-Object { $_ -cnotin $bridgeKeys }).Count -gt 0 -or
     $bridge.version -ne 1 -or
     $bridge.sessionId -isnot [string] -or
@@ -245,9 +246,19 @@ if ($bridgeKeys.Count -ne $requiredBridgeKeys.Count -or
     ($null -ne $bridge.recentIncreaseNanoAiu -and
         (-not (Test-NonnegativeInteger $bridge.recentIncreaseNanoAiu) -or
             -not (Test-NonnegativeInteger $bridge.recentAtMs) -or
+            $null -ne $bridge.recentSuppressedReason -or
+            [double]$bridge.recentAtMs -gt
+                [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 5000)) -or
+    ($null -ne $bridge.recentSuppressedReason -and
+        ($bridge.recentSuppressedReason -isnot [string] -or
+            $bridge.recentSuppressedReason -cnotin @('overlap', 'incomplete',
+                'early-usage', 'no-baseline', 'no-usage', 'subagent', 'reset',
+                'interrupted', 'ambiguous') -or
+            -not (Test-NonnegativeInteger $bridge.recentAtMs) -or
             [double]$bridge.recentAtMs -gt
                 [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 5000)) -or
     ($null -eq $bridge.recentIncreaseNanoAiu -and
+        $null -eq $bridge.recentSuppressedReason -and
         $null -ne $bridge.recentAtMs)) {
     throw 'The bridge snapshot does not match its bounded schema.'
 }
