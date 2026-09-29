@@ -653,13 +653,17 @@ function Get-RecentAicSegment {
     $delta = $SignalState['recentIncreaseNanoAiu']
     $recordedAt = ConvertTo-NullableNumber -Value $SignalState['recentAtMs']
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $placeholder = Format-LabeledValue -Label 'recent' -Value ([string][char]0x2014) `
+        -ValueColor $script:Dim
+    if ($null -eq $delta) { return $placeholder }
     if ($delta -is [bool] -or $delta -isnot [ValueType] -or
         $null -eq $recordedAt -or $delta -lt 0 -or
         [double]$delta -gt 9007199254740991 -or
         [double]$delta -ne [math]::Truncate([double]$delta) -or
-        $recordedAt -gt $now + 5000 -or $now - $recordedAt -gt 120000) {
+        $recordedAt -gt $now + 5000) {
         return $null
     }
+    if ($now - $recordedAt -gt 120000) { return $placeholder }
 
     $aiu = [double]$delta / 1000000000.0
     $formatted = $aiu.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)
@@ -1273,14 +1277,14 @@ function Get-AgentSegment {
                 } elseif ($status -eq 'complete') {
                     $glyph = $script:Dim + '•' + $script:Reset
                 } else {
-                    $glyph = $script:Dim + '?' + $script:Reset
+                    $glyph = $script:Dim + [string][char]0x2022 + $script:Reset
                 }
                 $outcomeText = if ($status -eq 'complete') {
                     $script:Dim + ' ended' + $script:Reset
                 } elseif ($status -eq 'failed') {
                     $script:Dim + ' failed' + $script:Reset
                 } else {
-                    $script:Dim + ' stopped' + $script:Reset
+                    $script:Dim + ' ended' + $script:Reset
                 }
                 return $glyph + ' ' + $agentLabel + $agentName + $durationText + $outcomeText
             }
@@ -1501,12 +1505,12 @@ function Get-CompactActivitySegment {
             $glyph = switch ($group.status) {
                 'failed' { $script:Bright + $script:Colors.red + '✗' + $script:Reset }
                 'ended' { $script:Dim + '•' + $script:Reset }
-                default { $script:Dim + '?' + $script:Reset }
+                default { $script:Dim + [string][char]0x2022 + $script:Reset }
             }
             $outcomeText = switch ($group.status) {
                 'ended' { $script:Dim + ' ended' + $script:Reset }
                 'failed' { $script:Dim + ' failed' + $script:Reset }
-                default { $script:Dim + ' stopped' + $script:Reset }
+                default { $script:Dim + ' ended' + $script:Reset }
             }
             $repeatText = if ($group.count -gt 1) { " x$($group.count)" } else { '' }
             $durationText = if ($null -ne $group.durationMs) {

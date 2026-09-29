@@ -882,9 +882,41 @@ try {
         $completeLines[2] -match '✓ Assistant turn complete') `
         "A fresh completed phase was not displayed: $($completeLines -join ' | ')"
 
+    $placeholderNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $placeholder = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) `
+        -SignalState (Get-FixtureSignalState -Phase $null -RecentDelta $null -Now $placeholderNow)
+    $placeholderLines = @(Get-OutputLines $placeholder)
+    Assert-Fixture ($placeholderLines[1] -match "recent $([char]0x2014)") `
+        "A fresh bridge without a recent interval did not show the placeholder: $($placeholderLines -join ' | ')"
+    Assert-Fixture ($placeholderLines[1] -notmatch 'recent \+') 'Placeholder claimed an increase.'
+    $noBridge = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) -SignalState $null
+    Assert-Fixture ((@(Get-OutputLines $noBridge))[1] -notmatch 'recent') `
+        'Placeholder appeared without a bridge snapshot.'
+    $staleNoRecent = Get-FixtureSignalState -Phase $null -RecentDelta $null -Now ($placeholderNow - 60000)
+    $staleOut = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) `
+        -SignalState $staleNoRecent -PreserveSignalTimestamp
+    Assert-Fixture ((@(Get-OutputLines $staleOut))[1] -notmatch 'recent') `
+        'Placeholder appeared for a stale bridge snapshot.'
+
+    $unknownHook = Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow
+    $unknownHook.lastSubagent = [ordered]@{
+        matchKey = 'unknown-outcome'; status = 'unknown'; durationMs = 3000
+        completedAtMs = $placeholderNow - 1000
+    }
+    $unknownOut = Invoke-StatuslineFixture -Width 120 -NoColor $true -BridgeEnabled '0' `
+        -HookState $unknownHook -SignalState $null
+    $unknownText = (@(Get-OutputLines $unknownOut)) -join ' | '
+    Assert-Fixture ($unknownText -match 'ended' -and $unknownText -notmatch 'stopped' -and
+        $unknownText -notmatch '\? ') `
+        "Unknown subagent outcome did not use the neutral ended label: $unknownText"
+
     Test-AtomicSignalSnapshots
     'StatuslineSignalFixturesPass=True'
     'Widths=80,120,160; ANSI/NO_COLOR=passed'
+    'RecentPlaceholder=fresh-bridge-only; UnknownOutcome=neutral-ended'
     'FleetCounts=1/2,confirmed-zero,unknown,5-minute hook lease,matching-session fallback,concurrent-session isolation'
     'TerminalLabel=ended-not-success; RootPhase=assistant-turn-complete'
     'IdleLines=2; ActiveLines=3; HookFallback=passed'

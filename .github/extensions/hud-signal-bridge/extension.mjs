@@ -279,10 +279,23 @@ async function startBridge() {
     heartbeat.unref();
 }
 
+// Attach without listeners so the host sees a ready, idle extension instead of
+// waiting for startup-timeout when the bridge is not opted in or cannot start.
+async function attachIdle() {
+    try {
+        await joinSession({ suppressResumeEvent: true });
+    } catch {
+        // Host attachment is best-effort; the HUD falls back to hook state.
+    }
+}
+
 if (process.env[OPT_IN] === "1") {
     try {
         await startBridge();
     } catch {
         reportOnce("Initialization failed");
+        await attachIdle();
     }
+} else {
+    await attachIdle();
 }
