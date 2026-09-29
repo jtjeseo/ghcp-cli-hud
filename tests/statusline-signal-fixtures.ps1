@@ -393,14 +393,14 @@ try {
         @{
             Name = 'zero'
             ZeroUsage = $true
-            Expected = "`e[38;5;244mI(total):`e[0m`e[38;5;244m0`e[0m  `e[38;5;244mO:`e[0m`e[38;5;244m0`e[0m  `e[38;5;244mC:`e[0m`e[38;5;244m0`e[0m `e[38;5;244m│`e[0m `e[38;5;108m+0`e[0m`e[38;5;244m/`e[0m`e[38;5;131m-0`e[0m"
-            PlainTail = 'I(total):0  O:0  C:0 │ +0/-0'
+            Expected = "`e[38;5;244mI `e[0m`e[38;5;244m0`e[0m`e[38;5;244m · `e[0m`e[38;5;244mO `e[0m`e[38;5;244m0`e[0m`e[38;5;244m · `e[0m`e[38;5;244mC `e[0m`e[38;5;244m0`e[0m `e[38;5;244m│`e[0m `e[38;5;108m+0`e[0m`e[38;5;244m/`e[0m`e[38;5;131m-0`e[0m"
+            PlainTail = 'I 0 · O 0 · C 0 │ +0/-0'
         },
         @{
             Name = 'populated'
             ZeroUsage = $false
-            Expected = "`e[38;5;244mI(total):`e[0m`e[38;5;244m100k`e[0m  `e[38;5;244mO:`e[0m`e[38;5;244m8k`e[0m  `e[38;5;244mC:`e[0m`e[38;5;244m2.2k`e[0m `e[38;5;244m│`e[0m `e[38;5;108m+120`e[0m`e[38;5;244m/`e[0m`e[38;5;131m-15`e[0m"
-            PlainTail = 'I(total):100k  O:8k  C:2.2k │ +120/-15'
+            Expected = "`e[38;5;244mI `e[0m`e[38;5;244m100k`e[0m`e[38;5;244m · `e[0m`e[38;5;244mO `e[0m`e[38;5;244m8k`e[0m`e[38;5;244m · `e[0m`e[38;5;244mC `e[0m`e[38;5;244m2.2k`e[0m `e[38;5;244m│`e[0m `e[38;5;108m+120`e[0m`e[38;5;244m/`e[0m`e[38;5;131m-15`e[0m"
+            PlainTail = 'I 100k · O 8k · C 2.2k │ +120/-15'
         }
     )
     foreach ($case in $mutedPalette) {

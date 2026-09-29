@@ -10,6 +10,8 @@ User-level Windows statusline and optional activity-tracking hooks for GitHub Co
 
 The AIC value is the session total read from `ai_used.formatted`. The default HUD does not show a delta. An experimental bridge (project-scoped, or user-wide per "Default install for every session") can opt in to a `recent +… AIU` checkpoint increase after a complete busy/idle interval; it is not labeled as a prompt or turn cost. While the bridge is fresh but has no recent interval (none yet, suppressed, or expired after 2 minutes), a dim `recent —` shows in its place; it is absent when no bridge state is present. Input and cache totals are not additive. Token totals (`I(total)`, `O`, `C`) and line changes use a muted palette (ANSI 256: gray 244, added 108, removed 131), identically for zero and populated values; `NO_COLOR` disables all color. Only the renderer and hooks are needed for this default HUD; the bridge is an optional add-on.
 
+**Quota segment:** when the marketplace `copilot-hud` extension is running, it writes `~\.copilot\hud-quota.json`. The renderer reads that local file (no network, no token) and shows `Quota ███░░ 91% 32k/35k · 2d left` on line 1 beside the context gauge, with an 8-block bar that only fills at 100% (cyan <75%, yellow >=75%, red >=90%). Pace: assuming a Monday-Friday work week, the segment compares usage with the share of the billing period's workdays already passed (`▲+N%` ahead, `▼-N%` behind, `● on pace` within 5 points) and shows the remaining allowance per remaining workday. Holidays are not modeled. Days left come from the file's `resetDate`. The detail and days-left drop first on narrow windows. The segment is hidden when the file is missing, malformed or older than 10 minutes. Fixtures: `tests\statusline-quota-fixtures.ps1`.
+
 ## Files
 
 - `statusline\statusline.cmd`: Windows wrapper; launches the PowerShell renderer.
@@ -61,7 +63,7 @@ Scope: your own Windows user profile only, for ordinary `copilot` launches. Noth
    ```
 
    The bridge needs an explicit `COPILOT_HOME`; the value above is the CLI's default location. Diagnostics, raw capture, and AIC validation stay off unless their own variables are set (leave them unset). Without the opt-in variable, or if it cannot start, the extension attaches idle with no listeners, so `/env` shows it Running instead of timing out, and it writes nothing. The bridge writes at most one bounded file per session under `.copilot\state\hud-signal-bridge`.
-3. **Verify** in a new terminal: run `copilot`, check `/env` shows `hud-signal-bridge` Running (from your user extensions, not Project), and confirm line 2 keeps the muted `I(total)/O/C` and `+/-` colors. After a reply, the HUD may show `recent +… AIU` (an interval increase, never a prompt price) and `✓ Assistant turn complete`; agent counts appear only while subagents run.
+3. **Verify** in a new terminal: run `copilot`, check `/env` shows `hud-signal-bridge` Running (from your user extensions, not Project), and confirm line 2 keeps the muted `I/O/C` and `+/-` colors. After a reply, the HUD may show `recent +… AIU` (an interval increase, never a prompt price) and `✓ Assistant turn complete`; agent counts appear only while subagents run.
 4. **Rollback** — close Copilot CLI, delete `%USERPROFILE%\.copilot\extensions\hud-signal-bridge`, clear both variables with `SetEnvironmentVariable(name, $null, 'User')`, and restore backed-up renderer/hook files. The bridge can be disabled alone by clearing `COPILOT_HUD_SIGNAL_BRIDGE`.
 
 Already-running sessions and terminals opened before the variables were set keep their old environment; restart them. Extensions are experimental and run with your privileges; keep only trusted code there.
@@ -174,7 +176,7 @@ Copy-Item .\statusline\statusline.ps1 "$base\statusline\" -Force
 Copy-Item .\hooks\state-hook.ps1 "$base\hooks\" -Force
 ```
 
-Rollback: close Copilot CLI and copy the backed-up files over the installed ones. Verify in a fresh session that line 2 ends with muted `I(total):… O:… C:… │ +…/-…` and that the bridge labels (`recent +… AIU`, `N subagents`) are absent unless you deliberately use the opt-in bridge launcher below.
+Rollback: close Copilot CLI and copy the backed-up files over the installed ones. Verify in a fresh session that line 2 ends with muted `I … · O … · C … │ +…/-…` and that the bridge labels (`recent +… AIU`, `N subagents`) are absent unless you deliberately use the opt-in bridge launcher below.
 
 ## Validation and recovery
 

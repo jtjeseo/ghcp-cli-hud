@@ -79,13 +79,14 @@ function Get-ThresholdColor {
 }
 
 function Get-GaugeBar {
-    param([double]$Percentage, [int]$Width = 10)
+    param([double]$Percentage, [int]$Width = 10, [switch]$Floor)
 
     $clamped = [math]::Min(100.0, [math]::Max(0.0, $Percentage))
-    $filled = [int][math]::Round(
-        $clamped * $Width / 100.0,
-        [MidpointRounding]::AwayFromZero
-    )
+    $filled = if ($Floor) {
+        [int][math]::Floor($clamped * $Width / 100.0)
+    } else {
+        [int][math]::Round($clamped * $Width / 100.0, [MidpointRounding]::AwayFromZero)
+    }
     $filled = [math]::Min($Width, [math]::Max(0, $filled))
     $empty = $Width - $filled
     $color = Get-ThresholdColor -Percentage $Percentage
@@ -575,22 +576,137 @@ function Get-TokenSegment {
 
     $parts = [System.Collections.Generic.List[string]]::new()
     if ($null -ne $inputTokens) {
-        [void]$parts.Add($script:Dim + 'I(total):' + $script:Reset +
+        [void]$parts.Add($script:Dim + 'I ' + $script:Reset +
             $script:Dim + (Format-Count $inputTokens) + $script:Reset)
     }
     if ($null -ne $outputTokens) {
-        [void]$parts.Add($script:Dim + 'O:' + $script:Reset +
+        [void]$parts.Add($script:Dim + 'O ' + $script:Reset +
             $script:Dim + (Format-Count $outputTokens) + $script:Reset)
     }
     if ($null -ne $cacheRead -or $null -ne $cacheWrite) {
         $cached = ($cacheRead ?? 0) + ($cacheWrite ?? 0)
-        [void]$parts.Add($script:Dim + 'C:' + $script:Reset +
+        [void]$parts.Add($script:Dim + 'C ' + $script:Reset +
             $script:Dim + (Format-Count $cached) + $script:Reset)
     }
     if ($parts.Count -eq 0) { return $null }
-    return [string]::Join('  ', $parts)
+    return [string]::Join($script:Dim + ' · ' + $script:Reset, $parts)
 }
 
+function Get-QuotaData {
+    $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
+        $env:COPILOT_HOME
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        Join-Path $env:USERPROFILE '.copilot'
+    } else {
+        return $null
+    }
+    $path = Join-Path $copilotHome 'hud-quota.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    if ((Get-Item -LiteralPath $path).Length -gt 65536) { return $null }
+    $data = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ($null -eq $data.updatedAt -or ($nowMs - [double]$data.updatedAt) -gt 600000) {
+        return $null
+    }
+    $quota = @($data.quotas) | Where-Object {
+        $_.unlimited -eq $false -and [double]$_.entitlement -gt 0
+    } | Sort-Object { [double]$_.entitlement } -Descending | Select-Object -First 1
+    if ($null -eq $quota) { return $null }
+
+    $used = [double]$quota.used
+    $entitlement = [double]$quota.entitlement
+    $days = $null
+    $reset = [DateTimeOffset]::MinValue
+    $resetText = if ($quota.resetDate -is [datetime]) {
+        $quota.resetDate.ToUniversalTime().ToString('o')
+    } else { [string]$quota.resetDate }
+    if ([DateTimeOffset]::TryParse($resetText, [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$reset)) {
+        $d = [int][math]::Ceiling(($reset - [DateTimeOffset]::UtcNow).TotalDays)
+        if ($d -ge 0) { $days = $d }
+    }
+    $percentage = [math]::Min(100.0, [math]::Max(0.0, 100.0 * $used / $entitlement))
+    $delta = $null
+    $perDay = $null
+    if ($null -ne $days) {
+        $end = $reset.UtcDateTime.Date
+        $start = $end.AddMonths(-1)
+        $today = [DateTime]::Today
+        $elapsed = 0
+        $remaining = 0
+        for ($day = $start; $day -lt $end; $day = $day.AddDays(1)) {
+            if ($day.DayOfWeek -eq [DayOfWeek]::Saturday -or
+                $day.DayOfWeek -eq [DayOfWeek]::Sunday) { continue }
+            if ($day -lt $today) { $elapsed++ } else { $remaining++ }
+        }
+        $total = $elapsed + $remaining
+        if ($total -gt 0) {
+            $delta = $percentage - (100.0 * $elapsed / $total)
+        }
+        if ($remaining -gt 0 -and $used -lt $entitlement) {
+            $perDay = ($entitlement - $used) / $remaining
+        }
+    }
+    return [pscustomobject]@{
+        Used = $used
+        Entitlement = $entitlement
+        Percentage = $percentage
+        Days = $days
+        PaceDelta = $delta
+        PerWorkday = $perDay
+    }
+}
+
+function Get-QuotaSegment {
+    param([AllowNull()][object]$QuotaData)
+
+    if ($null -eq $QuotaData) { return $null }
+    $color = Get-ThresholdColor -Percentage $QuotaData.Percentage
+    $rounded = [int][math]::Floor($QuotaData.Percentage)
+    return $script:Dim + 'Quota' + $script:Reset + ' ' +
+        (Get-GaugeBar -Percentage $QuotaData.Percentage -Width 8 -Floor) + ' ' +
+        $script:Bright + $color + "$rounded%" + $script:Reset
+}
+
+function Get-QuotaDetailSegment {
+    param([AllowNull()][object]$QuotaData)
+
+    if ($null -eq $QuotaData) { return $null }
+    return $script:Dim + (Format-Count $QuotaData.Used) + '/' +
+        (Format-Count $QuotaData.Entitlement) + $script:Reset
+}
+
+function Get-QuotaPaceSegment {
+    param([AllowNull()][object]$QuotaData)
+
+    if ($null -eq $QuotaData) { return $null }
+    $text = ''
+    if ($null -ne $QuotaData.PaceDelta) {
+        $points = [int][math]::Round($QuotaData.PaceDelta, 0, [MidpointRounding]::AwayFromZero)
+        if ($points -gt 5) {
+            $color = if ($points -gt 15) { $script:Colors.red } else { $script:Colors.yellow }
+            $text = $script:Bright + $color + "▲+$points%" + $script:Reset
+        } elseif ($points -lt -5) {
+            $text = $script:Colors.cyan + "▼$points%" + $script:Reset
+        } else {
+            $text = $script:Dim + '● on pace' + $script:Reset
+        }
+    }
+    if ($null -ne $QuotaData.PerWorkday) {
+        $budget = '⚡' + $script:Dim + (Format-Count ([math]::Floor($QuotaData.PerWorkday))) + '/workday' + $script:Reset
+        $text = if ($text) { $text + $script:Dim + ' · ' + $script:Reset + $budget } else { $budget }
+    }
+    if ($text) { return $text }
+    return $null
+}
+
+function Get-QuotaDaysSegment {
+    param([AllowNull()][object]$QuotaData)
+
+    if ($null -eq $QuotaData -or $null -eq $QuotaData.Days) { return $null }
+    $dayText = if ($QuotaData.Days -eq 0) { '<1d left' } else { "$($QuotaData.Days)d left" }
+    return $script:Dim + $dayText + $script:Reset
+}
 function Get-RateSegment {
     param([object]$Payload)
 
@@ -1710,7 +1826,7 @@ function Remove-OverflowSegments {
         activity = @('history')
     }
     $postCompactDropOrderByLine = @{
-        location = @('ctx-absolute')
+        location = @('ctx-absolute', 'quota-detail', 'quota-pace', 'quota-days')
         usage = @('recent-aic')
         activity = @('history', 'agents', 'activity', 'phase')
     }
@@ -1900,6 +2016,8 @@ if ($activeAgentSlots -eq 0 -and $activeToolGroups.Count -eq 0) {
     }
 }
 
+$quotaData = try { Get-QuotaData } catch { $null }
+$quotaSegment = Invoke-StatusSegment { Get-QuotaSegment $quotaData }
 $segments = [System.Collections.Generic.List[object]]::new()
 
 foreach ($segment in @(
@@ -1926,6 +2044,25 @@ foreach ($segment in @(
         Value = (Invoke-StatusSegment {
             Get-ContextPercentageSegment -ContextData $contextData
         })
+    },
+    [pscustomobject]@{
+        Key = 'quota'; Group = 'quota'; Line = 'location'
+        Value = $quotaSegment
+    },
+    [pscustomobject]@{
+        Key = 'quota-detail'; Group = 'quota'; Line = 'location'
+        SeparatorBefore = $script:Dim + ' · ' + $script:Reset
+        Value = (Invoke-StatusSegment { Get-QuotaDetailSegment $quotaData })
+    },
+    [pscustomobject]@{
+        Key = 'quota-pace'; Group = 'quota'; Line = 'location'
+        SeparatorBefore = $script:Dim + ' · ' + $script:Reset
+        Value = (Invoke-StatusSegment { Get-QuotaPaceSegment $quotaData })
+    },
+    [pscustomobject]@{
+        Key = 'quota-days'; Group = 'quota'; Line = 'location'
+        SeparatorBefore = $script:Dim + ' · ' + $script:Reset
+        Value = (Invoke-StatusSegment { Get-QuotaDaysSegment $quotaData })
     },
     [pscustomobject]@{
         Key = 'runtime'; Group = 'runtime'; Line = 'location'
