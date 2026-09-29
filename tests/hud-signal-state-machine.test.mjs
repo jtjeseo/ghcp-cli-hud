@@ -105,6 +105,7 @@ test("groups sequential internal turns by busy interval, not turnId", () => {
         "phaseAtMs",
         "recentAtMs",
         "recentIncreaseNanoAiu",
+        "recentSuppressedReason",
         "sessionId",
         "updatedAtMs",
         "version",
@@ -327,6 +328,11 @@ test("records overlapping turns and unverified subagent attribution as suppressi
     assert.equal(overlapValidation.eventOrder.overlapObserved, true);
     assert.equal(overlapValidation.displayedIncreaseNanoAiu, null);
     assert.equal(overlapping.snapshot().recentIncreaseNanoAiu, null);
+    assert.equal(overlapping.snapshot().recentSuppressedReason, "overlap");
+    assert.equal(overlapping.snapshot().recentAtMs, 3_825);
+    observe(overlapping, "assistant.turn_start", 3_830, { turnId: 2 });
+    assert.equal(overlapping.snapshot().recentSuppressedReason, null);
+    assert.equal(overlapping.snapshot().recentAtMs, null);
 
     const subagent = createAicValidationMachine(
         "aic-validation-subagent",
@@ -351,6 +357,7 @@ test("records overlapping turns and unverified subagent attribution as suppressi
     );
     assert.equal(subagentValidation.displayedIncreaseNanoAiu, null);
     assert.equal(subagent.snapshot().recentIncreaseNanoAiu, null);
+    assert.equal(subagent.snapshot().recentSuppressedReason, "subagent");
 });
 
 test("keeps checkpoint arithmetic exact for the displayed AIU precision", () => {
@@ -380,6 +387,7 @@ test("AIC validation leaves the normal derived-state snapshot unchanged", () => 
         "phaseAtMs",
         "recentAtMs",
         "recentIncreaseNanoAiu",
+        "recentSuppressedReason",
         "sessionId",
         "updatedAtMs",
         "version",
@@ -1323,6 +1331,7 @@ test("records matched starts and independent 2-to-1-to-0 terminals", () => {
         "phaseAtMs",
         "recentAtMs",
         "recentIncreaseNanoAiu",
+        "recentSuppressedReason",
         "sessionId",
         "updatedAtMs",
         "version",
@@ -1690,6 +1699,7 @@ test("heartbeats preserve a genuinely long-running tool phase without showing pr
         "phaseAtMs",
         "recentAtMs",
         "recentIncreaseNanoAiu",
+        "recentSuppressedReason",
         "sessionId",
         "updatedAtMs",
         "version",

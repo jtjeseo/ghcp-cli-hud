@@ -614,13 +614,17 @@ function Get-QuotaData {
             if ((Get-Item -LiteralPath $path).Length -gt 65536) { continue }
             $candidate = [IO.File]::ReadAllText($path) | ConvertFrom-Json
             if ($null -eq $candidate.updatedAt -or
-                ($nowMs - [double]$candidate.updatedAt) -gt 600000) { continue }
+                ($nowMs - [double]$candidate.updatedAt) -gt 604800000) { continue }
             if ($null -eq $data -or [double]$candidate.updatedAt -gt [double]$data.updatedAt) {
                 $data = $candidate
             }
         } catch {}
     }
     if ($null -eq $data) { return $null }
+    # Quota only refreshes on model calls, so idle sessions keep the last value
+    # (tagged with its age) instead of hiding it; stale data never moves the day baseline.
+    $ageMs = [math]::Max(0.0, $nowMs - [double]$data.updatedAt)
+    $stale = $ageMs -gt 600000
     $quota = @($data.quotas) | Where-Object {
         $_.unlimited -eq $false -and [double]$_.entitlement -gt 0
     } | Sort-Object { [double]$_.entitlement } -Descending | Select-Object -First 1
@@ -638,6 +642,7 @@ function Get-QuotaData {
         $d = [int][math]::Ceiling(($reset - [DateTimeOffset]::UtcNow).TotalDays)
         if ($d -ge 0) { $days = $d }
     }
+    if ($stale -and $null -eq $days) { return $null }
     $percentage = [math]::Min(100.0, [math]::Max(0.0, 100.0 * $used / $entitlement))
     $delta = $null
     $perDay = $null
@@ -668,7 +673,7 @@ function Get-QuotaData {
         $sessionEstimate = Get-QuotaSessionEstimate -CopilotHome $copilotHome -Payload $Payload -Used $used
     } catch { $sessionEstimate = 0.0 }
     try {
-        $baseline = Get-QuotaDayBaseline -CopilotHome $copilotHome -Used $used -Budget $perDay
+        $baseline = Get-QuotaDayBaseline -CopilotHome $copilotHome -Used $used -Budget $perDay -ReadOnly:$stale
         if ($null -ne $baseline) {
             $todayUsed = [math]::Max(0.0, $used - [double]$baseline.startUsed) + $sessionEstimate
             $todayEstimated = $sessionEstimate -gt 0
@@ -687,6 +692,8 @@ function Get-QuotaData {
         TodayUsed = $todayUsed
         TodayBudget = $todayBudget
         TodayEstimated = $todayEstimated
+        Stale = $stale
+        AgeMs = $ageMs
     }
 }
 
@@ -742,7 +749,7 @@ function Get-QuotaSessionEstimate {
 # Account-wide daily baseline: usage and budget captured at the first render of
 # each local day, so today's spend is measured against a budget fixed at day start.
 function Get-QuotaDayBaseline {
-    param([string]$CopilotHome, [double]$Used, [AllowNull()][object]$Budget)
+    param([string]$CopilotHome, [double]$Used, [AllowNull()][object]$Budget, [switch]$ReadOnly)
 
     $directory = Join-Path $CopilotHome 'state'
     $path = Join-Path $directory 'hud-quota-day.json'
@@ -754,6 +761,13 @@ function Get-QuotaDayBaseline {
             $existing = [IO.File]::ReadAllText($path) | ConvertFrom-Json
         }
     } catch { $existing = $null }
+    if ($ReadOnly) {
+        if ($null -ne $existing -and [string]$existing.date -ceq $today -and
+            $existing.startUsed -is [ValueType]) {
+            return $existing
+        }
+        return $null
+    }
     if ($null -ne $existing -and [string]$existing.date -ceq $today -and
         $existing.startUsed -is [ValueType] -and [double]$existing.startUsed -le $Used) {
         return $existing
@@ -783,9 +797,17 @@ function Get-QuotaSegment {
     if ($null -eq $QuotaData) { return $null }
     $color = Get-ThresholdColor -Percentage $QuotaData.Percentage
     $rounded = [int][math]::Floor($QuotaData.Percentage)
+    $age = ''
+    if ($QuotaData.Stale) {
+        $minutes = [math]::Floor([double]$QuotaData.AgeMs / 60000)
+        $ageText = if ($minutes -lt 60) { "${minutes}m" }
+            elseif ($minutes -lt 2880) { "$([math]::Floor($minutes / 60))h" }
+            else { "$([math]::Floor($minutes / 1440))d" }
+        $age = ' ' + $script:Dim + "($ageText ago)" + $script:Reset
+    }
     return $script:Dim + 'Quota' + $script:Reset + ' ' +
         (Get-GaugeBar -Percentage $QuotaData.Percentage -Width 8 -Floor) + ' ' +
-        $script:Bright + $color + "$rounded%" + $script:Reset
+        $script:Bright + $color + "$rounded%" + $script:Reset + $age
 }
 
 function Get-QuotaDetailSegment {
@@ -908,7 +930,13 @@ function Get-RecentAicSegment {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $placeholder = Format-LabeledValue -Label 'recent' -Value ([string][char]0x2014) `
         -ValueColor $script:Dim
-    if ($null -eq $delta) { return $placeholder }
+    if ($null -eq $delta) {
+        $reason = $SignalState['recentSuppressedReason']
+        if ($reason -is [string] -and $reason -cmatch '^[a-z-]{1,16}$') {
+            return $placeholder + ' ' + $script:Dim + "($($reason -replace '-', ' '))" + $script:Reset
+        }
+        return $placeholder
+    }
     if ($delta -is [bool] -or $delta -isnot [ValueType] -or
         $null -eq $recordedAt -or $delta -lt 0 -or
         [double]$delta -gt 9007199254740991 -or
@@ -1067,7 +1095,7 @@ function Get-HudSignalState {
             'version', 'sessionId', 'updatedAtMs', 'phase', 'phaseAtMs',
             'recentIncreaseNanoAiu', 'recentAtMs'
         )
-        $allowedProperties = $requiredProperties + @('activeSubagentCount')
+        $allowedProperties = $requiredProperties + @('activeSubagentCount', 'recentSuppressedReason')
         if ($state -isnot [System.Collections.IDictionary]) { return $null }
         $stateKeys = @($state.Keys)
         if (@($requiredProperties | Where-Object { $_ -cnotin $stateKeys }).Count -gt 0 -or
@@ -1105,14 +1133,31 @@ function Get-HudSignalState {
 
         $recentDelta = $state['recentIncreaseNanoAiu']
         $recentAt = $state['recentAtMs']
+        $suppressedReason = $null
+        if ($stateKeys -ccontains 'recentSuppressedReason') {
+            $suppressedReason = $state['recentSuppressedReason']
+        }
         if ($null -ne $recentDelta) {
             if (-not (Test-HudSignalInteger $recentDelta) -or
                 -not (Test-HudSignalInteger $recentAt) -or
+                $null -ne $suppressedReason -or
                 [double]$recentAt -gt $now + 5000) {
                 return $null
             }
             if ($now - [double]$recentAt -gt 120000) {
                 $recentDelta = $null
+                $recentAt = $null
+            }
+        } elseif ($null -ne $suppressedReason) {
+            if ($suppressedReason -isnot [string] -or
+                $suppressedReason -cnotin @('overlap', 'incomplete', 'early-usage',
+                    'no-baseline', 'no-usage', 'subagent', 'reset', 'interrupted', 'ambiguous') -or
+                -not (Test-HudSignalInteger $recentAt) -or
+                [double]$recentAt -gt $now + 5000) {
+                return $null
+            }
+            if ($now - [double]$recentAt -gt 120000) {
+                $suppressedReason = $null
                 $recentAt = $null
             }
         } elseif ($null -ne $recentAt) {
@@ -1134,6 +1179,7 @@ function Get-HudSignalState {
             phaseAtMs = $phaseAt
             recentIncreaseNanoAiu = $recentDelta
             recentAtMs = $recentAt
+            recentSuppressedReason = $suppressedReason
             activeSubagentCount = $activeSubagentCount
         }
     } catch {

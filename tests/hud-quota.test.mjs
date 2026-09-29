@@ -47,6 +47,7 @@ function signalSnapshot(sessionId, updatedAtMs) {
         phaseAtMs: updatedAtMs,
         recentIncreaseNanoAiu: null,
         recentAtMs: null,
+        recentSuppressedReason: null,
         activeSubagentCount: null,
     };
 }

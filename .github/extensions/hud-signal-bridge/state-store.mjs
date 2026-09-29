@@ -15,6 +15,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
     AIC_VALIDATION_REASONS,
     MAX_ACTIVE_SUBAGENTS,
+    RECENT_SUPPRESSION_CODES,
     SUBAGENT_COUNT_CHANGE_REASONS,
     TOOL_CORRELATION_DIAGNOSTIC_REASONS,
 } from "./state-machine.mjs";
@@ -80,8 +81,10 @@ const STATE_KEYS = new Set([
     "phaseAtMs",
     "recentIncreaseNanoAiu",
     "recentAtMs",
+    "recentSuppressedReason",
     "activeSubagentCount",
 ]);
+const RECENT_SUPPRESSION_CODE_SET = new Set(RECENT_SUPPRESSION_CODES);
 
 function isSafeInteger(value) {
     return Number.isSafeInteger(value) && value >= 0;
@@ -157,8 +160,14 @@ function validateSnapshot(snapshot, sessionId) {
     }
     if (snapshot.recentIncreaseNanoAiu !== null) {
         if (!isSafeInteger(snapshot.recentIncreaseNanoAiu) ||
-            !isSafeInteger(snapshot.recentAtMs)) {
+            !isSafeInteger(snapshot.recentAtMs) ||
+            snapshot.recentSuppressedReason !== null) {
             throw new Error("Signal snapshot has an invalid checkpoint difference");
+        }
+    } else if (snapshot.recentSuppressedReason !== null) {
+        if (!RECENT_SUPPRESSION_CODE_SET.has(snapshot.recentSuppressedReason) ||
+            !isSafeInteger(snapshot.recentAtMs)) {
+            throw new Error("Signal snapshot has an invalid suppression reason");
         }
     } else if (snapshot.recentAtMs !== null) {
         throw new Error("Signal snapshot has an orphaned checkpoint timestamp");
@@ -177,6 +186,7 @@ function validateSnapshot(snapshot, sessionId) {
         phaseAtMs: snapshot.phaseAtMs,
         recentIncreaseNanoAiu: snapshot.recentIncreaseNanoAiu,
         recentAtMs: snapshot.recentAtMs,
+        recentSuppressedReason: snapshot.recentSuppressedReason,
         activeSubagentCount: snapshot.activeSubagentCount,
     };
 }

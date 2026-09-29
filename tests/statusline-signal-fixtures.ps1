@@ -260,14 +260,14 @@ const now = Date.now();
 await store.write({
   version: 1, sessionId, updatedAtMs: now, phase: "working",
   phaseAtMs: now, recentIncreaseNanoAiu: null, recentAtMs: null,
-  activeSubagentCount: null
+  recentSuppressedReason: null, activeSubagentCount: null
 });
 await writeFile(readyPath, "ready", { encoding: "utf8", mode: 0o600 });
 for (let index = 0; index < 40; index += 1) {
   await store.write({
     version: 1, sessionId, updatedAtMs: now + index + 1, phase: "working",
     phaseAtMs: now, recentIncreaseNanoAiu: index + 1, recentAtMs: now,
-    activeSubagentCount: null
+    recentSuppressedReason: null, activeSubagentCount: null
   });
   await new Promise(resolve => setTimeout(resolve, 3));
 }
@@ -900,6 +900,42 @@ try {
         -SignalState $staleNoRecent -PreserveSignalTimestamp
     Assert-Fixture ((@(Get-OutputLines $staleOut))[1] -notmatch 'recent') `
         'Placeholder appeared for a stale bridge snapshot.'
+
+    $suppressed = Get-FixtureSignalState -Phase $null -RecentDelta $null -Now $placeholderNow
+    $suppressed['recentAtMs'] = $placeholderNow - 1000
+    $suppressed['recentSuppressedReason'] = 'overlap'
+    $suppressedOut = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) `
+        -SignalState $suppressed
+    Assert-Fixture ((@(Get-OutputLines $suppressedOut))[1] -match "recent $([char]0x2014) \(overlap\)") `
+        "Suppression reason was not shown: $suppressedOut"
+    $suppressed['recentSuppressedReason'] = 'early-usage'
+    $suppressedOut = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) `
+        -SignalState $suppressed
+    Assert-Fixture ((@(Get-OutputLines $suppressedOut))[1] -match "recent $([char]0x2014) \(early usage\)") `
+        "Hyphenated suppression reason was not humanized: $suppressedOut"
+    $suppressed['recentSuppressedReason'] = 'secret-token'
+    $suppressedOut = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) `
+        -SignalState $suppressed
+    Assert-Fixture ((@(Get-OutputLines $suppressedOut))[1] -notmatch 'recent|secret') `
+        'An unapproved suppression reason was rendered.'
+    $suppressed['recentSuppressedReason'] = 'overlap'
+    $suppressed['recentAtMs'] = $placeholderNow - 130000
+    $suppressedOut = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) `
+        -SignalState $suppressed -PreserveSignalTimestamp
+    $expiredLine = (@(Get-OutputLines $suppressedOut))[1]
+    Assert-Fixture ($expiredLine -match "recent $([char]0x2014)" -and $expiredLine -notmatch 'overlap') `
+        "Expired suppression reason was still shown: $suppressedOut"
+    $suppressed['recentIncreaseNanoAiu'] = 5
+    $suppressed['recentAtMs'] = $placeholderNow - 1000
+    $suppressedOut = Invoke-StatuslineFixture -Width 120 -NoColor $true `
+        -HookState (Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow) `
+        -SignalState $suppressed
+    Assert-Fixture ((@(Get-OutputLines $suppressedOut))[1] -notmatch 'recent') `
+        'A snapshot with both an increase and a suppression reason was accepted.'
 
     $unknownHook = Get-FixtureHookState -WithActiveTool $false -Now $placeholderNow
     $unknownHook.lastSubagent = [ordered]@{

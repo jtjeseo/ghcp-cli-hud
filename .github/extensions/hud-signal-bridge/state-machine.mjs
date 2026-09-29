@@ -9,6 +9,36 @@ const MAX_PENDING_SUBAGENT_TRANSITIONS = 32;
 const MAX_ACTIVE_TOOL_CALLS = 32;
 const MAX_AIC_VALIDATION_TURNS = 32;
 export const MAX_ACTIVE_SUBAGENTS = 16;
+export const RECENT_SUPPRESSION_CODES = Object.freeze([
+    "overlap",
+    "incomplete",
+    "early-usage",
+    "no-baseline",
+    "no-usage",
+    "subagent",
+    "reset",
+    "interrupted",
+    "ambiguous",
+]);
+const RECENT_SUPPRESSION_MAP = new Map([
+    ["overlapping-turns", "overlap"],
+    ["overlapping-tools", "overlap"],
+    ["incomplete-turns", "incomplete"],
+    ["checkpoint-before-turn-end", "early-usage"],
+    ["missing-baseline", "no-baseline"],
+    ["ambiguous-baseline", "no-baseline"],
+    ["missing-final-checkpoint", "no-usage"],
+    ["unverified-subagent-attribution", "subagent"],
+    ["counter-reset", "reset"],
+    ["resume-reset", "reset"],
+    ["observer-reset", "reset"],
+    ["interruption", "interrupted"],
+    ["permission-boundary", "interrupted"],
+]);
+
+function recentSuppressionCode(reason) {
+    return RECENT_SUPPRESSION_MAP.get(reason) ?? "ambiguous";
+}
 export const AIC_VALIDATION_REASONS = Object.freeze([
     "baseline-accepted",
     "valid",
@@ -180,12 +210,14 @@ export function createSignalMachine(
         phaseAtMs: null,
         recentIncreaseNanoAiu: null,
         recentAtMs: null,
+        recentSuppressedReason: null,
         activeSubagentCount: null,
     };
 
     function clearRecent() {
         output.recentIncreaseNanoAiu = null;
         output.recentAtMs = null;
+        output.recentSuppressedReason = null;
     }
 
     function enqueueAicValidation({
@@ -964,6 +996,11 @@ export function createSignalMachine(
                                                 ? "counter-reset"
                                                 : "ambiguous-event";
                 }
+                if (!validIncrease) {
+                    output.recentSuppressedReason =
+                        recentSuppressionCode(validationReason);
+                    output.recentAtMs = timestampMs;
+                }
                 enqueueAicValidation({
                     reason: validationReason,
                     validity: validIncrease ? "valid" : "suppressed",
@@ -1056,6 +1093,7 @@ export function createSignalMachine(
             phaseAtMs: output.phaseAtMs,
             recentIncreaseNanoAiu: output.recentIncreaseNanoAiu,
             recentAtMs: output.recentAtMs,
+            recentSuppressedReason: output.recentSuppressedReason,
             activeSubagentCount: output.activeSubagentCount,
         };
     }

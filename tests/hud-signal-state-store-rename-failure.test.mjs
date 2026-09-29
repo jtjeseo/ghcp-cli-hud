@@ -27,6 +27,7 @@ test("reports a sanitized native code when snapshot replacement fails", async ()
                 phaseAtMs: 1,
                 recentIncreaseNanoAiu: null,
                 recentAtMs: null,
+                recentSuppressedReason: null,
                 activeSubagentCount: null,
             }),
             (error) => {

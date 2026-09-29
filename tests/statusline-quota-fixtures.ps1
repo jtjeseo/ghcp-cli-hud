@@ -65,8 +65,21 @@ try {
         Assert-Quota ($plain -match "Quota \S+ $pct% · $pct/100 · (?:● on pace|▲\+\d+%|▼-\d+%)(?: · ⚡[\d.]+k?(?:/workday|/[\d.]+k? today))? · [34]d left") "plain quota text wrong at $pct%"
         Assert-Quota ($plain -notmatch "`e") 'NO_COLOR emitted escapes'
     }
+    Remove-Item -LiteralPath (Join-Path $home_ 'state') -Recurse -Force -ErrorAction SilentlyContinue
     Write-Quota 40 700000 3
-    Assert-Quota ((Render $true) -notmatch 'Quota') 'stale quota file was shown'
+    $stalePlain = Render $true
+    Assert-Quota ($stalePlain -match 'Quota \S+ 40% \(11m ago\)') "stale quota was not shown with its age: $stalePlain"
+    Assert-Quota (-not (Test-Path -LiteralPath (Join-Path (Join-Path $home_ 'state') 'hud-quota-day.json'))) 'stale quota wrote a day baseline'
+    Write-Quota 40 (3 * 3600000) 3
+    Assert-Quota ((Render $true) -match 'Quota \S+ 40% \(3h ago\)') 'hour-old quota age was wrong'
+    Write-Quota 40 (3 * 86400000) 3
+    Assert-Quota ((Render $true) -match 'Quota \S+ 40% \(3d ago\)') 'day-old quota age was wrong'
+    Write-Quota 40 (8 * 86400000) 3
+    Assert-Quota ((Render $true) -notmatch 'Quota') 'week-old quota file was shown'
+    Write-Quota 40 700000 -2
+    Assert-Quota ((Render $true) -notmatch 'Quota') 'stale quota from a finished period was shown'
+    Write-Quota 40 0 3
+    Assert-Quota ((Render $true) -notmatch 'ago\)') 'fresh quota was tagged with an age'
     Write-Quota 0 0 0 '{not json'
     Assert-Quota ((Render $true) -notmatch 'Quota') 'malformed quota file was shown'
     Write-Quota 0 0 0 '{"updatedAt":1,"quotas":null}'
@@ -155,7 +168,7 @@ try {
 
     'SessionEstimate=plan-move-reset,growth,no-ai,sessions-isolated,counter-decrease-rebaseline,malformed-recovery,NO_COLOR,no-errors'
     'DayMeter=bridge-preferred,fixed-budget,yellow,red,reset-rebaseline'
-    'Quota=hidden-when-missing/stale/malformed/null; thresholds=cyan,yellow,red; NO_COLOR=plain'
+    'Quota=hidden-when-missing/week-old/past-period/malformed/null; stale=aged-tag,read-only-baseline; thresholds=cyan,yellow,red; NO_COLOR=plain'
 } finally {
     Remove-Item -LiteralPath $home_ -Recurse -Force -ErrorAction SilentlyContinue
 }

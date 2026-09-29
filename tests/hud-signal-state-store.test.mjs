@@ -32,6 +32,7 @@ function snapshot(
         phaseAtMs: updatedAtMs,
         recentIncreaseNanoAiu,
         recentAtMs: recentIncreaseNanoAiu === null ? null : updatedAtMs,
+        recentSuppressedReason: null,
         activeSubagentCount,
     };
 }
@@ -86,6 +87,7 @@ test("writes only bounded, allowlisted, session-scoped derived state", async () 
             "phaseAtMs",
             "recentAtMs",
             "recentIncreaseNanoAiu",
+            "recentSuppressedReason",
             "sessionId",
             "updatedAtMs",
             "version",
@@ -98,6 +100,25 @@ test("writes only bounded, allowlisted, session-scoped derived state", async () 
         assert.throws(
             () => store.write({ ...value, activeSubagentCount: 17 }),
             /invalid active subagent count/
+        );
+        assert.throws(
+            () => store.write({ ...value, recentSuppressedReason: "overlap" }),
+            /invalid checkpoint difference/
+        );
+        const suppressed = {
+            ...value,
+            recentIncreaseNanoAiu: null,
+            recentSuppressedReason: "overlap",
+        };
+        await store.write(suppressed);
+        assert.deepEqual(JSON.parse(await readFile(path, "utf8")), suppressed);
+        assert.throws(
+            () => store.write({ ...suppressed, recentSuppressedReason: "free text" }),
+            /invalid suppression reason/
+        );
+        assert.throws(
+            () => store.write({ ...suppressed, recentAtMs: null }),
+            /invalid suppression reason/
         );
         assert.equal((await readFile(path, "utf8")).includes("not permitted"), false);
         assert.deepEqual(await readdir(directory), [`hud-signal-${sessionId}.json`]);
