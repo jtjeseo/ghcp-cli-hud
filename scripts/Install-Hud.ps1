@@ -36,7 +36,7 @@ Add-Target (Join-Path $repo 'hooks\state-hook.ps1') 'hooks\state-hook.ps1'
 Add-Target (Join-Path $repo 'hooks\state-hook.sh') 'hooks\state-hook.sh'
 Add-Target (Join-Path $repo 'hooks\session-state-hooks.json') 'hooks\session-state-hooks.json.disabled' -OnlyIfMissing
 if ($IncludeBridge) {
-    foreach ($name in 'extension.mjs', 'state-machine.mjs', 'state-store.mjs') {
+    foreach ($name in 'extension.mjs', 'quota.mjs', 'state-machine.mjs', 'state-store.mjs') {
         Add-Target (Join-Path $bridgeSource $name) "extensions\hud-signal-bridge\$name"
     }
 }

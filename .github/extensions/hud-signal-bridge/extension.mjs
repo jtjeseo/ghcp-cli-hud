@@ -1,7 +1,9 @@
 import { joinSession } from "@github/copilot-sdk/extension";
+import { createQuotaWriter } from "./quota.mjs";
 import { createSignalMachine } from "./state-machine.mjs";
 import {
     createAicValidationStore,
+    createQuotaStateStore,
     createSignalStateStore,
     createSubagentTransitionStore,
     isDisposableCopilotHome,
@@ -52,6 +54,19 @@ function reportAicValidationOnce(message) {
 }
 reportAicValidationOnce.reported = false;
 
+function reportQuotaOnce(message) {
+    if (reportQuotaOnce.reported) {
+        return;
+    }
+    reportQuotaOnce.reported = true;
+    try {
+        console.error(`[hud-signal-bridge] ${message}; quota capture stopped.`);
+    } catch {
+        // A quota diagnostic must never affect the session listener.
+    }
+}
+reportQuotaOnce.reported = false;
+
 async function startBridge() {
     const sessionId = safeSessionId(process.env.SESSION_ID);
     const copilotHome = process.env.COPILOT_HOME;
@@ -64,6 +79,16 @@ async function startBridge() {
     if (safeSessionId(session.sessionId) !== sessionId ||
         typeof session.on !== "function") {
         throw new Error("Observer did not attach to the CLI-provided session");
+    }
+
+    let quotaWriter = null;
+    try {
+        const quotaStore = await createQuotaStateStore(copilotHome);
+        quotaWriter = createQuotaWriter(quotaStore, () =>
+            reportQuotaOnce("Account quota update failed")
+        );
+    } catch {
+        reportQuotaOnce("Account quota storage could not be initialized");
     }
 
     let diagnosticStore = null;
@@ -243,6 +268,14 @@ async function startBridge() {
     }
 
     session.on((event) => {
+        if (quotaWriter !== null) {
+            try {
+                quotaWriter(event);
+            } catch {
+                quotaWriter = null;
+                reportQuotaOnce("Account quota event processing failed");
+            }
+        }
         try {
             const changed = machine.observe(event);
             scheduleDiagnosticWrite();

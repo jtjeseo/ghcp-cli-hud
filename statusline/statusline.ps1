@@ -593,6 +593,8 @@ function Get-TokenSegment {
 }
 
 function Get-QuotaData {
+    param([AllowNull()][object]$Payload)
+
     $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
         $env:COPILOT_HOME
     } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
@@ -600,14 +602,25 @@ function Get-QuotaData {
     } else {
         return $null
     }
-    $path = Join-Path $copilotHome 'hud-quota.json'
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
-    if ((Get-Item -LiteralPath $path).Length -gt 65536) { return $null }
-    $data = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+    # Prefer our bridge's own capture; fall back to the marketplace copilot-hud file.
     $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    if ($null -eq $data.updatedAt -or ($nowMs - [double]$data.updatedAt) -gt 600000) {
-        return $null
+    $data = $null
+    foreach ($path in @(
+        (Join-Path (Join-Path (Join-Path $copilotHome 'state') 'hud-signal-bridge') 'hud-quota.json'),
+        (Join-Path $copilotHome 'hud-quota.json')
+    )) {
+        try {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            if ((Get-Item -LiteralPath $path).Length -gt 65536) { continue }
+            $candidate = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+            if ($null -eq $candidate.updatedAt -or
+                ($nowMs - [double]$candidate.updatedAt) -gt 600000) { continue }
+            if ($null -eq $data -or [double]$candidate.updatedAt -gt [double]$data.updatedAt) {
+                $data = $candidate
+            }
+        } catch {}
     }
+    if ($null -eq $data) { return $null }
     $quota = @($data.quotas) | Where-Object {
         $_.unlimited -eq $false -and [double]$_.entitlement -gt 0
     } | Sort-Object { [double]$_.entitlement } -Descending | Select-Object -First 1
@@ -647,6 +660,23 @@ function Get-QuotaData {
             $perDay = ($entitlement - $used) / $remaining
         }
     }
+    $todayUsed = $null
+    $todayBudget = $null
+    $todayEstimated = $false
+    $sessionEstimate = 0.0
+    try {
+        $sessionEstimate = Get-QuotaSessionEstimate -CopilotHome $copilotHome -Payload $Payload -Used $used
+    } catch { $sessionEstimate = 0.0 }
+    try {
+        $baseline = Get-QuotaDayBaseline -CopilotHome $copilotHome -Used $used -Budget $perDay
+        if ($null -ne $baseline) {
+            $todayUsed = [math]::Max(0.0, $used - [double]$baseline.startUsed) + $sessionEstimate
+            $todayEstimated = $sessionEstimate -gt 0
+            if ($null -ne $baseline.budget -and [double]$baseline.budget -gt 0) {
+                $todayBudget = [double]$baseline.budget
+            }
+        }
+    } catch {}
     return [pscustomobject]@{
         Used = $used
         Entitlement = $entitlement
@@ -654,7 +684,97 @@ function Get-QuotaData {
         Days = $days
         PaceDelta = $delta
         PerWorkday = $perDay
+        TodayUsed = $todayUsed
+        TodayBudget = $todayBudget
+        TodayEstimated = $todayEstimated
     }
+}
+
+# The plan counter only moves in coarse, delayed steps. Between steps, estimate
+# this session's unbilled usage as the session AIC growth since the counter last
+# moved; the estimate resets whenever the counter moves, so error never accumulates.
+function Get-QuotaSessionEstimate {
+    param([string]$CopilotHome, [AllowNull()][object]$Payload, [double]$Used)
+
+    $sessionId = Get-FirstValue -InputObject $Payload -Paths @('session_id')
+    if ($null -eq $sessionId) { return 0.0 }
+    $sessionId = [string]$sessionId
+    if ($sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$') { return 0.0 }
+    $nano = Get-FirstNumber -InputObject $Payload -Paths @('ai_used.total_nano_aiu')
+    if ($null -eq $nano -or $nano -lt 0) { return 0.0 }
+    $aic = [double]$nano / 1000000000.0
+
+    $directory = Join-Path $CopilotHome 'state'
+    $path = Join-Path $directory "hud-quota-est-$sessionId.json"
+    $existing = $null
+    try {
+        if ((Test-Path -LiteralPath $path -PathType Leaf) -and
+            (Get-Item -LiteralPath $path).Length -le 1024) {
+            $existing = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+        }
+    } catch { $existing = $null }
+
+    if ($null -ne $existing -and $existing.plan -is [ValueType] -and
+        $existing.aic -is [ValueType] -and [double]$existing.plan -eq $Used -and
+        [double]$existing.aic -le $aic) {
+        return [math]::Max(0.0, $aic - [double]$existing.aic)
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $directory -Force)
+        }
+        $temporary = "$path.$PID.tmp"
+        [IO.File]::WriteAllText($temporary,
+            ([pscustomobject]@{ plan = $Used; aic = $aic } | ConvertTo-Json -Compress))
+        Move-Item -LiteralPath $temporary -Destination $path -Force
+        $cutoff = [DateTime]::UtcNow.AddDays(-2)
+        Get-ChildItem -LiteralPath $directory -Filter 'hud-quota-est-*.json*' -File |
+            Where-Object { $_.LastWriteTimeUtc -lt $cutoff } |
+            Select-Object -First 32 |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch {
+        Remove-Item -LiteralPath "$path.$PID.tmp" -Force -ErrorAction SilentlyContinue
+    }
+    return 0.0
+}
+
+# Account-wide daily baseline: usage and budget captured at the first render of
+# each local day, so today's spend is measured against a budget fixed at day start.
+function Get-QuotaDayBaseline {
+    param([string]$CopilotHome, [double]$Used, [AllowNull()][object]$Budget)
+
+    $directory = Join-Path $CopilotHome 'state'
+    $path = Join-Path $directory 'hud-quota-day.json'
+    $today = [DateTime]::Today.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+    $existing = $null
+    try {
+        if ((Test-Path -LiteralPath $path -PathType Leaf) -and
+            (Get-Item -LiteralPath $path).Length -le 4096) {
+            $existing = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+        }
+    } catch { $existing = $null }
+    if ($null -ne $existing -and [string]$existing.date -ceq $today -and
+        $existing.startUsed -is [ValueType] -and [double]$existing.startUsed -le $Used) {
+        return $existing
+    }
+
+    $record = [pscustomobject]@{
+        date = $today
+        startUsed = $Used
+        budget = if ($null -ne $Budget) { [math]::Round([double]$Budget, 2) } else { $null }
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $directory -Force)
+        }
+        $temporary = "$path.$PID.tmp"
+        [IO.File]::WriteAllText($temporary, ($record | ConvertTo-Json -Compress))
+        Move-Item -LiteralPath $temporary -Destination $path -Force
+    } catch {
+        Remove-Item -LiteralPath "$path.$PID.tmp" -Force -ErrorAction SilentlyContinue
+    }
+    return $record
 }
 
 function Get-QuotaSegment {
@@ -692,8 +812,25 @@ function Get-QuotaPaceSegment {
             $text = $script:Dim + '● on pace' + $script:Reset
         }
     }
-    if ($null -ne $QuotaData.PerWorkday) {
+    $budget = $null
+    if ($null -ne $QuotaData.TodayUsed -and $null -ne $QuotaData.TodayBudget) {
+        $spent = $QuotaData.TodayUsed
+        $limit = $QuotaData.TodayBudget
+        $ratio = 100.0 * $spent / $limit
+        $spentColor = if ($ratio -ge 100) {
+            $script:Bright + $script:Colors.red
+        } elseif ($ratio -ge 75) {
+            $script:Bright + $script:Colors.yellow
+        } else {
+            $script:Dim
+        }
+        $approx = if ($QuotaData.TodayEstimated) { '~' } else { '' }
+        $budget = '⚡' + $spentColor + $approx + (Format-Count ([math]::Floor($spent))) + $script:Reset +
+            $script:Dim + '/' + (Format-Count ([math]::Floor($limit))) + ' today' + $script:Reset
+    } elseif ($null -ne $QuotaData.PerWorkday) {
         $budget = '⚡' + $script:Dim + (Format-Count ([math]::Floor($QuotaData.PerWorkday))) + '/workday' + $script:Reset
+    }
+    if ($null -ne $budget) {
         $text = if ($text) { $text + $script:Dim + ' · ' + $script:Reset + $budget } else { $budget }
     }
     if ($text) { return $text }
@@ -2016,7 +2153,7 @@ if ($activeAgentSlots -eq 0 -and $activeToolGroups.Count -eq 0) {
     }
 }
 
-$quotaData = try { Get-QuotaData } catch { $null }
+$quotaData = try { Get-QuotaData -Payload $payload } catch { $null }
 $quotaSegment = Invoke-StatusSegment { Get-QuotaSegment $quotaData }
 $segments = [System.Collections.Generic.List[object]]::new()
 

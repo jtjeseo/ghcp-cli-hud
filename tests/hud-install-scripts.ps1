@@ -29,7 +29,7 @@ try {
     Assert-Fixture (Test-Path "$backup\manifest.json") 'manifest written'
     Assert-Fixture ((Hash "$h\statusline\statusline.ps1") -eq (Hash "$repo\statusline\statusline.ps1")) 'renderer installed'
     Assert-Fixture ((Hash "$h\hooks\state-hook.ps1") -eq (Hash "$repo\hooks\state-hook.ps1")) 'hook installed'
-    foreach ($n in 'extension.mjs', 'state-machine.mjs', 'state-store.mjs') {
+    foreach ($n in 'extension.mjs', 'quota.mjs', 'state-machine.mjs', 'state-store.mjs') {
         Assert-Fixture ((Hash "$h\extensions\hud-signal-bridge\$n") -eq (Hash "$repo\.github\extensions\hud-signal-bridge\$n")) "bridge $n installed"
     }
     foreach ($p in $before.Keys) { Assert-Fixture ((Hash "$h\$p") -eq $before[$p]) "$p unchanged" }

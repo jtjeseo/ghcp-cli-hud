@@ -23,6 +23,7 @@ const MAX_STATE_BYTES = 4096;
 const MAX_STATE_FILES = 64;
 const STALE_STATE_MS = 24 * 60 * 60 * 1000;
 const STALE_TEMP_MS = 15 * 60 * 1000;
+const QUOTA_TEMP_FILE_PATTERN = /^hud-quota\.json\.\d+\.[0-9a-f-]{36}\.tmp$/;
 const MAX_DIAGNOSTIC_RECORDS = 32;
 const MAX_DIAGNOSTIC_FILES = 64;
 const DIAGNOSTIC_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -441,6 +442,27 @@ async function pruneStateDirectory(directory, currentPath) {
     }
 }
 
+async function pruneQuotaTemporaryFiles(directory) {
+    const now = Date.now();
+    let entries;
+    try {
+        entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+        throw new Error("Could not inspect the account quota state directory");
+    }
+
+    for (const entry of entries) {
+        if (!entry.isFile() ||
+            !QUOTA_TEMP_FILE_PATTERN.test(entry.name)) {
+            continue;
+        }
+        await removeIfExpired(
+            join(directory, entry.name),
+            now - STALE_TEMP_MS
+        );
+    }
+}
+
 async function pruneDiagnosticDirectory(directory, currentPath) {
     const now = Date.now();
     let entries;
@@ -608,6 +630,45 @@ export async function createSignalStateStore(copilotHome, sessionId) {
             );
             writeTail = write.catch(() => undefined);
             return write;
+        },
+    };
+}
+
+export async function createQuotaStateStore(copilotHome) {
+    if (typeof copilotHome !== "string" || !isAbsolute(copilotHome)) {
+        throw new TypeError("An absolute COPILOT_HOME is required");
+    }
+    if (process.platform === "win32" &&
+        !/^[A-Za-z]:[\\/]/.test(copilotHome)) {
+        throw new TypeError("COPILOT_HOME must be on a local Windows drive");
+    }
+
+    const homePath = resolve(copilotHome);
+    await mkdir(homePath, { recursive: true, mode: 0o700 });
+    const realHome = await realpath(homePath);
+    const stateDirectory = resolve(homePath, "state", "hud-signal-bridge");
+    if (!isWithin(homePath, stateDirectory)) {
+        throw new Error("HUD quota state must be inside COPILOT_HOME");
+    }
+
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    const directoryInfo = await lstat(stateDirectory);
+    const realStateDirectory = await realpath(stateDirectory);
+    if (!directoryInfo.isDirectory() ||
+        directoryInfo.isSymbolicLink() ||
+        !isWithin(realHome, realStateDirectory)) {
+        throw new Error("HUD quota state directory is not private local storage");
+    }
+
+    await pruneQuotaTemporaryFiles(stateDirectory);
+    const path = join(stateDirectory, "hud-quota.json");
+    return {
+        write(snapshot) {
+            return writeSnapshotAtomically(
+                path,
+                snapshot,
+                "account quota snapshot"
+            );
         },
     };
 }
