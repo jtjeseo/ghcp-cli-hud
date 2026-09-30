@@ -10,6 +10,9 @@ export const GIT_FETCH_MS = 300000;
 const LOCK_TTL_MS = 120000;
 const MAX_BYTES = 4096;
 const fetchScript = fileURLToPath(new URL("./git-fetch.ps1", import.meta.url));
+const windowsPowerShell = process.platform === "win32"
+    ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    : "pwsh";
 const digest = (value) => createHash("sha256").update(value, "utf8").digest("hex");
 const safeTime = (value) => Number.isSafeInteger(value) && value >= 0;
 
@@ -118,8 +121,8 @@ export async function runGitFetch({ root, remote, refspec, home, deadlineMs = Da
         fileURLToPath(new URL("./git-fetch.sh", import.meta.url)),
         root, remote, refspec, join(home, "hud-git-sync.json"),
         String(process.pid), String(deadlineMs),
-    ], 20000) : await runProcess("pwsh", [
-        "-NoLogo", "-NoProfile", "-NonInteractive", "-File", fetchScript,
+    ], 20000) : await runProcess(windowsPowerShell, [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fetchScript,
         "-Repository", root, "-Remote", remote, "-Refspec", refspec,
         "-OptionsPath", join(home, "hud-git-sync.json"),
         "-OwnerProcessId", String(process.pid),

@@ -1,4 +1,4 @@
-# Temporary schema diagnostics only: set COPILOT_RAW_PAYLOAD_CAPTURE=1 for one run.
+﻿# Temporary schema diagnostics only: set COPILOT_RAW_PAYLOAD_CAPTURE=1 for one run.
 # Unset it afterward; captures are retained until manually removed.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -9,6 +9,39 @@ $utf8 = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
 $script:IsWindowsPlatform = [IO.Path]::DirectorySeparatorChar -eq '\'
+
+function ConvertTo-HudJsonDictionary {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [Collections.IDictionary] -or $Value -is [pscustomobject]) {
+        $result = [Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+        if ($Value -is [Collections.IDictionary]) {
+            foreach ($key in $Value.Keys) { $result.Add([string]$key, (ConvertTo-HudJsonDictionary $Value[$key])) }
+        } else {
+            foreach ($property in $Value.PSObject.Properties) {
+                $result.Add($property.Name, (ConvertTo-HudJsonDictionary $property.Value))
+            }
+        }
+        return ,$result
+    }
+    if ($Value -is [array]) {
+        $items = [Collections.Generic.List[object]]::new()
+        foreach ($item in $Value) { $items.Add((ConvertTo-HudJsonDictionary $item)) }
+        return ,$items.ToArray()
+    }
+    return $Value
+}
+
+function ConvertFrom-HudJson {
+    param([string]$Text)
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        return (ConvertFrom-Json -InputObject $Text -AsHashtable -ErrorAction Stop)
+    }
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    $serializer = [Web.Script.Serialization.JavaScriptSerializer]::new()
+    $serializer.RecursionLimit = 256
+    return ConvertTo-HudJsonDictionary ($serializer.DeserializeObject($Text))
+}
 
 function Get-HudHome {
     if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) { return $env:COPILOT_HOME }
@@ -194,7 +227,9 @@ function ConvertTo-NullableNumber {
         [System.Globalization.CultureInfo]::InvariantCulture,
         [ref]$number
     )
-    if ($parsed -and [double]::IsFinite($number) -and $number -ge 0) { return $number }
+    if ($parsed -and -not [double]::IsNaN($number) -and -not [double]::IsInfinity($number) -and $number -ge 0) {
+        return $number
+    }
     return $null
 }
 
@@ -755,7 +790,8 @@ function Get-TokenSegment {
             $script:Dim + (Format-Count $outputTokens) + $script:Reset)
     }
     if ($null -ne $cacheRead -or $null -ne $cacheWrite) {
-        $cached = ($cacheRead ?? 0) + ($cacheWrite ?? 0)
+        $cached = $(if ($null -eq $cacheRead) { 0 } else { $cacheRead }) +
+            $(if ($null -eq $cacheWrite) { 0 } else { $cacheWrite })
         [void]$parts.Add($script:Dim + 'C ' + $script:Reset +
             $script:Dim + (Format-Count $cached) + $script:Reset)
     }
@@ -1051,7 +1087,7 @@ function Read-QuotaEstimateRecord {
             $offset += $read
         }
         $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes).TrimStart([char]0xFEFF)
-        return ($text | ConvertFrom-Json -AsHashtable -ErrorAction Stop)
+        return ConvertFrom-HudJson $text
     } finally {
         if ($null -ne $stream) { $stream.Dispose() }
     }
@@ -1524,8 +1560,7 @@ function Get-SessionState {
         $statePath = Join-Path (Join-Path $copilotHome 'state') "hud-state-$sessionId.json"
         if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $null }
 
-        $state = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop |
-            ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        $state = ConvertFrom-HudJson ([IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8))
         if ($state -is [System.Collections.IDictionary] -and
             [string]$state['sessionId'] -ceq $sessionId) {
             return $state
@@ -1597,7 +1632,7 @@ function Get-HudSignalState {
         $stream = $null
 
         $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
-        $state = ConvertFrom-Json -InputObject $text -AsHashtable -ErrorAction Stop
+        $state = ConvertFrom-HudJson $text
         $requiredProperties = @(
             'version', 'sessionId', 'updatedAtMs', 'phase', 'phaseAtMs',
             'recentIncreaseNanoAiu', 'recentAtMs'
@@ -2592,7 +2627,7 @@ $payload = @{}
 try {
     $rawInput = [Console]::In.ReadToEnd()
     if (-not [string]::IsNullOrWhiteSpace($rawInput)) {
-        $parsed = ConvertFrom-Json -InputObject $rawInput -AsHashtable -ErrorAction Stop
+        $parsed = ConvertFrom-HudJson $rawInput
         if ($parsed -is [System.Collections.IDictionary]) { $payload = $parsed }
     }
 } catch {

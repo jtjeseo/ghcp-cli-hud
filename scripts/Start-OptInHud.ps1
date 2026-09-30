@@ -67,7 +67,7 @@ foreach ($path in $requiredFiles) {
         throw 'A required project bridge, renderer, or hook file is missing.'
     }
 }
-$null = Get-Command pwsh -ErrorAction Stop
+$null = Get-Command powershell.exe -ErrorAction Stop
 
 $expectedEvents = @(
     'sessionStart',
@@ -243,7 +243,7 @@ if (@(Get-ChildItem -LiteralPath $ghConfigDirectory -Force).Count -ne 0) {
 
 if ($PreflightOnly) {
     $preflightTemplate = 'Preflight passed: hooks={0}; PowerShell handler={1}; ' +
-        'Bash handler={2}; statusline=pwsh; COPILOT_HOME=fresh; ' +
+        'Bash handler={2}; statusline=Windows PowerShell 5.1+; COPILOT_HOME=fresh; ' +
         'AICValidation={3}; AICObserver={4}; Copilot=not launched.'
     $preflightMessage = $preflightTemplate -f $expectedEvents.Count,
         [System.IO.File]::Exists($powerShellHookDestination),

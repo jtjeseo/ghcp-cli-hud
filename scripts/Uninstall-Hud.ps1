@@ -19,9 +19,6 @@ $ErrorActionPreference = 'Stop'
 $manifestPath = Join-Path $BackupPath 'manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "No manifest.json in $BackupPath" }
 $m = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ($m.PSObject.Properties['configuration'] -and $PSVersionTable.PSVersion.Major -lt 7) {
-    throw 'This setup configured settings; use pwsh (PowerShell 7) for its rollback.'
-}
 $home_ = [string]$m.copilotHome
 if (-not (Test-Path -LiteralPath $home_ -PathType Container)) { throw "Recorded Copilot home not found: $home_" }
 . (Join-Path $PSScriptRoot 'Hud-Paths.ps1')

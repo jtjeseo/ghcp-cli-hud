@@ -5,6 +5,7 @@ param(
     [double]$WorkerAic
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Hud-FixtureHelpers.ps1')
 $renderer = Join-Path (Split-Path -Parent $PSScriptRoot) 'statusline\statusline.ps1'
 $tokens = $null
 $errors = $null
@@ -50,11 +51,9 @@ function Check([object]$Result, [double]$Amount, [bool]$Complete = $true) {
 }
 function Start-Worker([string]$CopilotHome, [string]$Id, [double]$Aic) {
     $psi = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
-    foreach ($argument in @('-NoProfile', '-File', $PSCommandPath, '-Worker',
+    Set-HudProcessArguments $psi @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Worker',
         '-WorkerHome', $CopilotHome, '-WorkerId', $Id, '-WorkerAic',
-        $Aic.ToString([Globalization.CultureInfo]::InvariantCulture))) {
-        [void]$psi.ArgumentList.Add($argument)
-    }
+        $Aic.ToString([Globalization.CultureInfo]::InvariantCulture))
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true

@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$CopilotHome = $(if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else {
@@ -13,6 +13,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $windows = [IO.Path]::DirectorySeparatorChar -eq '\'
 if (-not $windows -and -not $IsMacOS) { throw 'Setup supports Windows and macOS.' }
+if (-not $windows -and $PSVersionTable.PSVersion.Major -lt 7) { throw 'macOS setup requires PowerShell 7.' }
 if ($Basic -and $EnableGitSync) { throw '-EnableGitSync requires the full bridge; omit -Basic.' }
 
 function Test-SetupApplication {
@@ -74,5 +75,6 @@ if ($EnableGitSync) { 'Git sync preference installed; existing enabled/disabled 
 if ($output -match 'Hooks: existing session-state-hooks.json left unchanged') {
     'Existing active hooks were kept. If they are not HUD hooks, tool labels require manual hook integration.'
 }
-'Undo: pwsh -NoProfile -File "' + (Join-Path $PSScriptRoot 'Uninstall-Hud.ps1') +
+$undoHost = if ($windows) { 'powershell.exe' } else { 'pwsh' }
+'Undo: ' + $undoHost + ' -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'Uninstall-Hud.ps1') +
     '" -BackupPath "' + $backup + '"'

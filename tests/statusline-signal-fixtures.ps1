@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path -Path $PSScriptRoot -Parent
 $statuslinePath = Join-Path $repositoryRoot 'statusline\statusline.ps1'
-$pwshPath = (Get-Command pwsh -ErrorAction Stop).Source
+$pwshPath = if ($env:HUD_TEST_POWERSHELL) { $env:HUD_TEST_POWERSHELL } else { (Get-Command pwsh -ErrorAction Stop).Source }
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'copilot-hud-statusline-fixtures-' + [guid]::NewGuid().ToString('N')
 )
@@ -203,6 +203,8 @@ function Invoke-StatuslineFixture {
     $startInfo.StandardInputEncoding = $utf8
     $startInfo.StandardOutputEncoding = $utf8
     $startInfo.ArgumentList.Add('-NoProfile')
+    $startInfo.ArgumentList.Add('-ExecutionPolicy')
+    $startInfo.ArgumentList.Add('Bypass')
     $startInfo.ArgumentList.Add('-File')
     $startInfo.ArgumentList.Add($statuslinePath)
     $startInfo.Environment['COPILOT_HOME'] = $copilotHome

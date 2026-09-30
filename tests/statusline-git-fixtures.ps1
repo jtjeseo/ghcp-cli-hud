@@ -1,4 +1,5 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Hud-FixtureHelpers.ps1')
 $repo = Split-Path -Parent $PSScriptRoot
 $renderer = Join-Path $repo 'statusline\statusline.ps1'
 $root = Join-Path ([IO.Path]::GetTempPath()) ('hud-git-render-' + [guid]::NewGuid().ToString('N'))
@@ -25,8 +26,9 @@ function Write-Json([string]$Path, [object]$Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 4 -Compress))
 }
 function Render([int]$Width = 120, [bool]$NoColor = $true, [string]$Cwd = $workspace) {
-    $info = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
-    foreach ($argument in @('-NoProfile', '-File', $renderer)) { [void]$info.ArgumentList.Add($argument) }
+    $hostPath = if ($env:HUD_TEST_POWERSHELL) { $env:HUD_TEST_POWERSHELL } else { (Get-Process -Id $PID).Path }
+    $info = [Diagnostics.ProcessStartInfo]::new($hostPath)
+    Set-HudProcessArguments $info @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $renderer)
     $info.UseShellExecute = $false
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
@@ -74,7 +76,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $gitDirectory 'HEAD'), "ref: refs/heads/main`n")
     $key = Get-GitDirectoryKey $gitDirectory
     $nodeKey = & node --input-type=module -e `
-        'import {gitDirectoryKey} from "./.github/extensions/hud-signal-bridge/git-sync.mjs"; process.stdout.write(gitDirectoryKey(process.argv[1]));' `
+        "import {gitDirectoryKey} from './.github/extensions/hud-signal-bridge/git-sync.mjs'; process.stdout.write(gitDirectoryKey(process.argv[1]));" `
         $gitDirectory
     Assert-Git ($LASTEXITCODE -eq 0 -and $nodeKey -ceq $key) 'Node/PowerShell worktree keys do not match.'
     $optionsPath = Join-Path $home_ 'hud-git-sync.json'

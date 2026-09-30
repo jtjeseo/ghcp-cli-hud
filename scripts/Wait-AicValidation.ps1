@@ -158,15 +158,18 @@ function Invoke-AicInspector {
     }
 
     try {
-        $pwshPath = (Get-Command pwsh -ErrorAction Stop).Source
+        $pwshPath = if ([IO.Path]::DirectorySeparatorChar -eq '\') {
+            Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        } else { (Get-Command pwsh -ErrorAction Stop).Source }
         $inspectorPath = Join-Path $PSScriptRoot 'Show-AicValidation.ps1'
         $startInfo = [System.Diagnostics.ProcessStartInfo]::new($pwshPath)
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
-        $startInfo.Arguments = '-NoLogo -NoProfile -File "' + $inspectorPath +
-            '" -CopilotHome "' + $copilotHome + '"'
+        . (Join-Path $PSScriptRoot 'Hud-Process.ps1')
+        Set-HudProcessArguments $startInfo @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', $inspectorPath, '-CopilotHome', $copilotHome)
 
         $process = [System.Diagnostics.Process]::new()
         $process.StartInfo = $startInfo

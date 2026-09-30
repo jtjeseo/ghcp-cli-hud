@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Hud-FixtureHelpers.ps1')
 $repo = Split-Path -Parent $PSScriptRoot
 $setup = Join-Path $repo 'scripts\Setup-Hud.ps1'
 $install = Join-Path $repo 'scripts\Install-Hud.ps1'
@@ -32,13 +33,16 @@ function Render-Setup([string]$Command) {
     [void]$info.Environment.Remove('COPILOT_HOME')
     [void]$info.Environment.Remove('COPILOT_HUD_SIGNAL_BRIDGE')
     $info.Environment['NO_COLOR'] = '1'
+    if ($windows -and $PSVersionTable.PSVersion.Major -eq 5) {
+        $info.Environment['PATH'] = Join-Path $env:SystemRoot 'System32'
+    }
     $p = [Diagnostics.Process]::Start($info)
     try {
         $stdout = $p.StandardOutput.ReadToEndAsync()
         $stderr = $p.StandardError.ReadToEndAsync()
         $p.StandardInput.Write('{"session_id":"handoff-fixture","terminal_width":120,"context_window":{"last_call_input_tokens":1000,"context_window_size":200000}}')
         $p.StandardInput.Close()
-        if (-not $p.WaitForExit(10000)) { $p.Kill($true); throw 'Installed statusline timed out.' }
+        if (-not $p.WaitForExit(10000)) { Stop-HudProcessTree $p; throw 'Installed statusline timed out.' }
         $text = $stdout.GetAwaiter().GetResult()
         Assert-Setup ($p.ExitCode -eq 0 -and $stderr.GetAwaiter().GetResult().Length -eq 0) 'Installed command failed.'
         Assert-Setup ($text -match 'Working' -and $text -match 'recent \+2.00 AIU') `
@@ -67,7 +71,7 @@ try {
     $backup = Backup-From $out
     Assert-Setup ([IO.File]::Exists((Join-Path $backup 'manifest.json'))) 'Setup omitted its backup.'
     $settingsPath = Join-Path $home_ 'settings.json'
-    $settings = [IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json -AsHashtable
+    $settings = ConvertFrom-HudJson ([IO.File]::ReadAllText($settingsPath))
     Assert-Setup ($settings.experimental -eq $true -and $settings.statusLine.type -eq 'command') 'Setup did not configure the bridge and statusline.'
     Assert-Setup ([IO.File]::Exists((Join-Path $home_ 'hud-signal-bridge.json'))) 'Portable bridge opt-in missing.'
     $activeHooks = Join-Path $home_ 'hooks\session-state-hooks.json'
@@ -82,7 +86,7 @@ try {
     $settings['newPreference'] = @{ keep = $true }
     Write-SetupText $settingsPath ($settings | ConvertTo-Json -Depth 8)
     & $undo -BackupPath $backup | Out-Null
-    $restored = [IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json -AsHashtable
+    $restored = ConvertFrom-HudJson ([IO.File]::ReadAllText($settingsPath))
     Assert-Setup ($restored.newPreference.keep -eq $true -and -not $restored.Contains('statusLine') -and
         -not $restored.Contains('experimental')) 'Undo lost later preferences or retained HUD-owned settings.'
     Assert-Setup (-not [IO.File]::Exists($activeHooks)) 'Undo retained installer-created active hooks.'
@@ -95,13 +99,11 @@ try {
     Assert-Setup ($refused -and (Get-FileHash -LiteralPath $settingsPath).Hash -eq $before) 'Another statusline was overwritten without explicit consent.'
     $out = & $install -CopilotHome $home_ -ConfigureStatusLine -ReplaceStatusLine | Out-String
     $backup = Backup-From $out
-    $doc = [Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($settingsPath))
-    try {
-        Assert-Setup ($doc.RootElement.GetProperty('stamp').ValueKind -eq [Text.Json.JsonValueKind]::String) 'A date-like string changed type.'
-        Assert-Setup ($doc.RootElement.GetProperty('amount').GetRawText() -ceq '9007199254740993') 'An unrelated number lost precision.'
-        Assert-Setup ($doc.RootElement.GetProperty('theme').GetString() -ceq 'dark') 'An unrelated preference changed.'
-        Assert-Setup ($doc.RootElement.GetProperty('statusLine').GetProperty('refreshInterval').GetInt32() -eq 9) 'Existing refresh preference was lost.'
-    } finally { $doc.Dispose() }
+    $doc = [CopilotHud.JsonValue]::Parse([IO.File]::ReadAllText($settingsPath))
+    Assert-Setup ($doc.Get('stamp').Kind -eq 'string') 'A date-like string changed type.'
+    Assert-Setup ($doc.Get('amount').Raw -ceq '9007199254740993') 'An unrelated number lost precision.'
+    Assert-Setup ($doc.Get('theme').Text -ceq 'dark') 'An unrelated preference changed.'
+    Assert-Setup ($doc.Get('statusLine').Get('refreshInterval').Raw -ceq '9') 'Existing refresh preference was lost.'
     & $undo -BackupPath $backup | Out-Null
     Assert-Setup ((Get-FileHash -LiteralPath $settingsPath).Hash -eq $before) 'Unchanged configured settings were not restored byte-for-byte.'
 
@@ -115,12 +117,31 @@ try {
     Remove-Item -LiteralPath $activeHooks
     $out = & $install -CopilotHome $home_ -ConfigureStatusLine -ReplaceStatusLine -EnableHooks | Out-String
     $backup = Backup-From $out
-    $hooks = [IO.File]::ReadAllText($activeHooks) | ConvertFrom-Json -AsHashtable
+    $hooks = ConvertFrom-HudJson ([IO.File]::ReadAllText($activeHooks))
     $hooks['addedPreference'] = 'keep'
     Write-SetupText $activeHooks ($hooks | ConvertTo-Json -Depth 12)
     & $undo -BackupPath $backup | Out-Null
     Assert-Setup ([IO.File]::Exists((Join-Path $home_ 'hooks\state-hook.ps1')) -and
         [IO.File]::Exists((Join-Path $home_ 'hooks\state-hook.sh'))) 'Edited active hooks lost their referenced handlers.'
+    if ($windows) {
+        $wrapperPath = Join-Path $home_ 'statusline\statusline.cmd'
+        $legacyWrapper = @'
+@echo off
+setlocal
+if not defined COPILOT_HOME for %%I in ("%~dp0..") do set "COPILOT_HOME=%%~fI"
+chcp 65001 >nul
+pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0statusline.ps1"
+exit /b %ERRORLEVEL%
+'@
+        Write-SetupText $wrapperPath ($legacyWrapper.Replace("`n", "`r`n") + "`r`n")
+        $legacyHash = (Get-FileHash -LiteralPath $wrapperPath).Hash
+        $out = & $install -CopilotHome $home_ -ConfigureStatusLine -ReplaceStatusLine | Out-String
+        $backup = Backup-From $out
+        Assert-Setup ((Get-FileHash -LiteralPath $wrapperPath).Hash -eq
+            (Get-FileHash -LiteralPath (Join-Path $repo 'statusline\statusline.cmd')).Hash) 'Stock wrapper was not upgraded.'
+        & $undo -BackupPath $backup | Out-Null
+        Assert-Setup ((Get-FileHash -LiteralPath $wrapperPath).Hash -eq $legacyHash) 'Stock wrapper upgrade did not roll back exactly.'
+    }
     . (Join-Path $repo 'scripts\Hud-Configuration.ps1')
     foreach ($invalid in '[]', '{bad', '{"a":1,"a":2}', (' ' * 1048577)) {
         $invalidPath = Join-Path $root 'invalid-settings.json'

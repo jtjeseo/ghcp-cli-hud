@@ -49,9 +49,7 @@ if ($EnableBridge -and (-not $IncludeBridge -or -not $ConfigureStatusLine)) {
     throw '-EnableBridge requires -IncludeBridge and -ConfigureStatusLine.'
 }
 if ($ReplaceStatusLine -and -not $ConfigureStatusLine) { throw '-ReplaceStatusLine requires -ConfigureStatusLine.' }
-if (($ConfigureStatusLine -or $EnableHooks) -and $PSVersionTable.PSVersion.Major -lt 7) {
-    throw 'Configuration and hook activation require PowerShell 7. Run this command with pwsh.'
-}
+if (-not $windows -and $PSVersionTable.PSVersion.Major -lt 7) { throw 'macOS installation requires PowerShell 7.' }
 if (-not $windows -and -not $IsMacOS) { throw 'The installer supports Windows and macOS.' }
 
 $bridgeSource = Join-Path $repo '.github\extensions\hud-signal-bridge'
@@ -64,7 +62,23 @@ function Add-Target([string]$Source, [string]$Relative, [switch]$OnlyIfMissing, 
 }
 Add-Target (Join-Path $repo 'statusline\statusline.ps1') 'statusline\statusline.ps1'
 $wrapper = if ($windows) { 'statusline.cmd' } else { 'statusline.sh' }
-Add-Target (Join-Path (Join-Path $repo 'statusline') $wrapper) (Join-Path 'statusline' $wrapper) -OnlyIfMissing
+$keepWrapper = $true
+if ($windows) {
+    $wrapperPath = Join-Path (Join-Path $CopilotHome 'statusline') $wrapper
+    Assert-HudTargetPath $CopilotHome $wrapperPath
+    if ([IO.File]::Exists($wrapperPath)) {
+        $legacyWrapper = @'
+@echo off
+setlocal
+if not defined COPILOT_HOME for %%I in ("%~dp0..") do set "COPILOT_HOME=%%~fI"
+chcp 65001 >nul
+pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0statusline.ps1"
+exit /b %ERRORLEVEL%
+'@
+        $keepWrapper = [IO.File]::ReadAllText($wrapperPath).Replace("`r`n", "`n").TrimEnd("`n") -cne $legacyWrapper
+    }
+}
+Add-Target (Join-Path (Join-Path $repo 'statusline') $wrapper) (Join-Path 'statusline' $wrapper) -OnlyIfMissing:$keepWrapper
 Add-Target (Join-Path $repo 'hooks\state-hook.ps1') 'hooks\state-hook.ps1'
 Add-Target (Join-Path $repo 'hooks\state-hook.sh') 'hooks\state-hook.sh'
 $activeHookConfig = Join-Path $CopilotHome 'hooks\session-state-hooks.json'

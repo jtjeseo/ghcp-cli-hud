@@ -36,7 +36,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($name in 'hud-install-scripts', 'hud-setup-fixtures', 'statusline-git-fixtures',
+          foreach ($name in 'hud-install-scripts', 'hud-setup-fixtures', 'hud-json-fixtures', 'statusline-git-fixtures',
               'statusline-signal-fixtures', 'statusline-quota-fixtures', 'statusline-quota-shared-fixtures') {
             & pwsh -NoProfile -File (Join-Path .\tests ($name + '.ps1'))
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -45,10 +45,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          foreach ($name in 'hud-launcher-environment', 'hud-aic-validation-inspector', 'state-hook-powershell51-fixtures') {
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in 'hud-install-scripts', 'hud-setup-fixtures', 'hud-json-fixtures',
+              'hud-powershell51-fixtures', 'statusline-git-fixtures', 'statusline-quota-fixtures',
+              'statusline-quota-shared-fixtures', 'hud-launcher-environment',
+              'hud-aic-validation-inspector', 'state-hook-powershell51-fixtures') {
             & powershell.exe -NoProfile -File (Join-Path .\tests ($name + '.ps1'))
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      - name: Windows 5.1 signal renderer fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:HUD_TEST_POWERSHELL = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & pwsh -NoProfile -File .\tests\statusline-signal-fixtures.ps1
+          exit $LASTEXITCODE
       - name: Native macOS Bash fixtures
         if: runner.os == 'macOS'
         shell: bash

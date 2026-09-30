@@ -1,4 +1,5 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Hud-FixtureHelpers.ps1')
 $root = Split-Path -Parent $PSScriptRoot
 $script = Join-Path $root 'statusline\statusline.ps1'
 $home_ = Join-Path ([IO.Path]::GetTempPath()) ("hud-quota-" + [guid]::NewGuid().ToString('N'))
@@ -8,8 +9,9 @@ function Render([bool]$NoColor, [AllowNull()][string]$Payload = $null) {
     if ($null -eq $Payload) {
         $Payload = '{"session_id":"quota-fixture","context_window":{"context_window_size":200000,"total_input_tokens":10,"total_output_tokens":5}}'
     }
-    $psi = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
-    foreach ($a in @('-NoProfile', '-File', $script)) { [void]$psi.ArgumentList.Add($a) }
+    $hostPath = if ($env:HUD_TEST_POWERSHELL) { $env:HUD_TEST_POWERSHELL } else { (Get-Process -Id $PID).Path }
+    $psi = [Diagnostics.ProcessStartInfo]::new($hostPath)
+    Set-HudProcessArguments $psi @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script)
     $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
     $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
@@ -63,7 +65,7 @@ try {
         Assert-Quota ($ansi -match "$($expected[$pct])m[^\r\n]*$pct%") "threshold color wrong at $pct%"
         $plain = Render $true
         Assert-Quota ($plain -match "Quota \S+ $pct% · $pct/100 · (?:● on pace|▲\+\d+%|▼-\d+%)(?: · ⚡[\d.]+k?(?:/workday|/[\d.]+k? today))? · [34]d left") "plain quota text wrong at $pct%"
-        Assert-Quota ($plain -notmatch "`e") 'NO_COLOR emitted escapes'
+        Assert-Quota (-not $plain.Contains([string][char]27)) 'NO_COLOR emitted escapes'
     }
     Remove-Item -LiteralPath (Join-Path $home_ 'state') -Recurse -Force -ErrorAction SilentlyContinue
     Write-Quota 40 700000 3
@@ -122,12 +124,12 @@ try {
     Write-SessionQuota 1070
     $plain = Render $true '{"session_id":"s1","ai_used":{"total_nano_aiu":200000000000}}'
     Assert-Quota ($plain -match '⚡70/100 today' -and $plain -notmatch '⚡~') 'first session render was not based only on the plan counter'
-    Assert-Quota ($plain -notmatch "`e") 'NO_COLOR emitted escapes for initial session estimate'
+    Assert-Quota (-not $plain.Contains([string][char]27)) 'NO_COLOR emitted escapes for initial session estimate'
 
     Write-SessionQuota 1070
     $plain = Render $true '{"session_id":"s1","ai_used":{"total_nano_aiu":206860000000}}'
-    Assert-Quota ($plain -match '⚡~76/100 today') 'session estimate did not include 6.86 AIU'
-    Assert-Quota ($plain -notmatch "`e") 'NO_COLOR emitted escapes for growing session estimate'
+    Assert-Quota ($plain -match '⚡~76/100 today') ("session estimate did not include 6.86 AIU: " + $plain)
+    Assert-Quota (-not $plain.Contains([string][char]27)) 'NO_COLOR emitted escapes for growing session estimate'
 
     Write-SessionQuota 1070
     $plain = Render $true '{"session_id":"s1","ai_used":{"total_nano_aiu":215310000000}}'

@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Version 5.1
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Repository,
@@ -210,10 +210,10 @@ function Test-FetchEnabled {
     try {
         if (-not [IO.File]::Exists($OptionsPath) -or
             (Get-Item -LiteralPath $OptionsPath).Length -gt 256) { return $false }
-        $options = [IO.File]::ReadAllText($OptionsPath) | ConvertFrom-Json -AsHashtable
-        return $options -is [Collections.IDictionary] -and $options.Count -eq 2 -and
-            $options.Contains('version') -and $options.Contains('enabled') -and
-            $options.version -isnot [bool] -and $options.version -eq 1 -and
+        $options = [IO.File]::ReadAllText($OptionsPath) | ConvertFrom-Json
+        return $options -is [pscustomobject] -and @($options.PSObject.Properties).Count -eq 2 -and
+            $null -ne $options.PSObject.Properties['version'] -and $null -ne $options.PSObject.Properties['enabled'] -and
+            $options.version -is [ValueType] -and $options.version -isnot [bool] -and $options.version -eq 1 -and
             $options.enabled -is [bool] -and $options.enabled
     } catch { return $false }
 }
