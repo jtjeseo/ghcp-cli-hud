@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Path $PSScriptRoot -Parent
 $statuslinePath = Join-Path $repositoryRoot 'statusline\statusline.ps1'
 $pwshPath = (Get-Command pwsh -ErrorAction Stop).Source
-$testRoot = Join-Path $env:TEMP (
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'copilot-hud-statusline-fixtures-' + [guid]::NewGuid().ToString('N')
 )
 $copilotHome = Join-Path $testRoot 'copilot-home'

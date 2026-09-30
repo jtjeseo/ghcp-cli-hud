@@ -1,10 +1,11 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $renderer = Join-Path $repo 'statusline\statusline.ps1'
-$root = Join-Path $env:TEMP ('hud-git-render-' + [guid]::NewGuid().ToString('N'))
+$root = Join-Path ([IO.Path]::GetTempPath()) ('hud-git-render-' + [guid]::NewGuid().ToString('N'))
 $home_ = Join-Path $root 'home'
 $workspace = Join-Path $root 'workspace'
 $gitDirectory = Join-Path $workspace '.git'
+$script:IsWindowsPlatform = [IO.Path]::DirectorySeparatorChar -eq '\'
 $tokens = $null
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($renderer, [ref]$tokens, [ref]$parseErrors)

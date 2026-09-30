@@ -19,17 +19,57 @@ $ErrorActionPreference = 'Stop'
 $manifestPath = Join-Path $BackupPath 'manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "No manifest.json in $BackupPath" }
 $m = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ($m.PSObject.Properties['configuration'] -and $PSVersionTable.PSVersion.Major -lt 7) {
+    throw 'This setup configured settings; use pwsh (PowerShell 7) for its rollback.'
+}
 $home_ = [string]$m.copilotHome
 if (-not (Test-Path -LiteralPath $home_ -PathType Container)) { throw "Recorded Copilot home not found: $home_" }
+. (Join-Path $PSScriptRoot 'Hud-Paths.ps1')
+Assert-HudTargetPath $home_ $home_
+foreach ($entry in @($m.files)) {
+    Assert-HudTargetPath $home_ (Join-Path $home_ $entry.relative)
+}
 
 $restored = 0; $removed = 0; $kept = 0
+$keepHookHandlers = $false
+if (-not $Force) {
+    foreach ($entry in @($m.files)) {
+        if ($entry.relative -eq 'hooks\session-state-hooks.json' -and -not $entry.skipped) {
+            $path = Join-Path $home_ $entry.relative
+            if ((Test-Path -LiteralPath $path -PathType Leaf) -and
+                (Get-FileHash -LiteralPath $path).Hash -ne $entry.sha256Installed) { $keepHookHandlers = $true }
+        }
+    }
+}
 foreach ($e in @($m.files)) {
     $dest = Join-Path $home_ $e.relative
     if ($e.skipped) { continue }
+    if ($keepHookHandlers -and $e.relative -in @('hooks\state-hook.ps1', 'hooks\state-hook.sh')) {
+        "Kept (changed active hooks may still use this handler): $($e.relative)"
+        $kept++
+        continue
+    }
     $present = Test-Path -LiteralPath $dest -PathType Leaf
     if ($present -and -not $Force) {
         $now = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
-        if ($now -ne $e.sha256Installed) { "Kept (changed since install): $($e.relative)"; $kept++; continue }
+        if ($now -ne $e.sha256Installed) {
+            if ($e.relative -eq 'settings.json' -and $m.PSObject.Properties['configuration']) {
+                . (Join-Path $PSScriptRoot 'Hud-Configuration.ps1')
+                $original = if ($e.existed) { Join-Path $BackupPath 'settings.json' } else { $null }
+                $settings = Get-HudRestoredSettings -Path $dest -OriginalPath $original `
+                    -Command $m.configuration.command -EnabledExperimental $m.configuration.enabledExperimental
+                if ($settings.Changed -and $PSCmdlet.ShouldProcess('settings.json', 'Restore only HUD-owned configuration')) {
+                    if (-not $e.existed -and $settings.Empty) { Remove-Item -LiteralPath $dest; $removed++ }
+                    else {
+                        [IO.File]::WriteAllText($dest, $settings.Text, (New-Object Text.UTF8Encoding $false))
+                        $restored++
+                    }
+                    'Settings: HUD-owned configuration restored; later unrelated edits preserved.'
+                    continue
+                }
+            }
+            "Kept (changed since install): $($e.relative)"; $kept++; continue
+        }
     }
     if ($e.existed) {
         $src = Join-Path $BackupPath $e.relative
@@ -44,7 +84,8 @@ foreach ($e in @($m.files)) {
     }
 }
 $bridgeDir = Join-Path $home_ 'extensions\hud-signal-bridge'
-if ((Test-Path -LiteralPath $bridgeDir) -and @(Get-ChildItem -LiteralPath $bridgeDir -Force).Count -eq 0) {
+if ((Test-Path -LiteralPath $bridgeDir) -and @(Get-ChildItem -LiteralPath $bridgeDir -Force).Count -eq 0 -and
+    $PSCmdlet.ShouldProcess('extensions\hud-signal-bridge', 'Remove empty extension directory')) {
     Remove-Item -LiteralPath $bridgeDir -Force
 }
 if ($RestoreEnvironment -and $m.setEnvironment) {

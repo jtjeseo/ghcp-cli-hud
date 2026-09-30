@@ -14,7 +14,7 @@ import {
 const exec = promisify(execFile);
 async function git(cwd, ...args) {
     const result = await exec("git", [
-        "-C", cwd, "-c", "core.hooksPath=NUL", "-c", "commit.gpgsign=false",
+        "-C", cwd, "-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`, "-c", "commit.gpgsign=false",
         "-c", "user.name=HUD Fixture", "-c", "user.email=hud-fixture@example.invalid", ...args,
     ], { windowsHide: true });
     return result.stdout.trim();

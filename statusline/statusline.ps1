@@ -8,6 +8,43 @@ $utf8 = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
+$script:IsWindowsPlatform = [IO.Path]::DirectorySeparatorChar -eq '\'
+
+function Get-HudHome {
+    if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) { return $env:COPILOT_HOME }
+    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if (-not [string]::IsNullOrWhiteSpace($profile)) { return (Join-Path $profile '.copilot') }
+    return $null
+}
+
+function Test-HudLocalPath {
+    param([AllowNull()][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if ($script:IsWindowsPlatform) { return $Path -match '^[A-Za-z]:[\\/]' }
+    return $Path.StartsWith('/', [StringComparison]::Ordinal) -and
+        -not $Path.StartsWith('//', [StringComparison]::Ordinal)
+}
+
+function Test-HudBridgeEnabled {
+    param([string]$CopilotHome)
+    $value = [Environment]::GetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE')
+    if (-not [string]::IsNullOrEmpty($value)) { return $value -ceq '1' }
+    $path = Join-Path $CopilotHome 'hud-signal-bridge.json'
+    if (-not [IO.File]::Exists($path)) { return $false }
+    try {
+        $options = Read-QuotaEstimateRecord -Path $path -MaxBytes 256
+        if ($options -isnot [Collections.IDictionary] -or $options.Count -ne 2 -or
+            -not $options.Contains('version') -or -not $options.Contains('enabled') -or
+            -not (Test-HudSignalInteger $options.version) -or $options.version -ne 1 -or
+            $options.enabled -isnot [bool]) { throw 'Invalid bridge options' }
+        return $options.enabled
+    } catch {
+        try {
+            [IO.File]::WriteAllText((Join-Path $CopilotHome 'hud-bridge-warning.log'), 'invalid-options')
+        } catch {}
+        return $false
+    }
+}
 
 $script:Escape = [char]27
 $script:AnsiEnabled = $false
@@ -293,15 +330,16 @@ function ConvertTo-ProjectLabel {
     $normalized = $Path.Trim().Replace('/', '\').TrimEnd('\')
     if ($normalized -match '^[a-z][a-z0-9+.-]*://') { return $null }
 
-    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile).TrimEnd('\')
+    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile).Replace('/', '\').TrimEnd('\')
+    $separator = if ($script:IsWindowsPlatform) { '\' } else { '/' }
     if (-not [string]::IsNullOrWhiteSpace($profile)) {
         if ($normalized.Equals($profile, [StringComparison]::OrdinalIgnoreCase)) { return '~' }
         if ($normalized.StartsWith($profile + '\', [StringComparison]::OrdinalIgnoreCase)) {
             $relative = $normalized.Substring($profile.Length).TrimStart('\')
             $relativeParts = @($relative -split '\\' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             if ($relativeParts.Count -gt 2) { $relativeParts = @($relativeParts | Select-Object -Last 2) }
-            $safeRelative = ConvertTo-SafeText -Value ([string]::Join('\', [string[]]$relativeParts)) -MaximumLength 48
-            if ($safeRelative) { return '~\' + $safeRelative }
+            $safeRelative = ConvertTo-SafeText -Value ([string]::Join($separator, [string[]]$relativeParts)) -MaximumLength 48
+            if ($safeRelative) { return '~' + $separator + $safeRelative }
             return '~'
         }
     }
@@ -324,7 +362,7 @@ function ConvertTo-ProjectLabel {
     $parts = @($parts | Where-Object { $privateNames -notcontains $_ })
     if ($parts.Count -gt 2) { $parts = @($parts | Select-Object -Last 2) }
     if ($parts.Count -eq 0) { return 'cwd' }
-    $safeLabel = ConvertTo-SafeText -Value ([string]::Join('\', [string[]]$parts)) -MaximumLength 48
+    $safeLabel = ConvertTo-SafeText -Value ([string]::Join($separator, [string[]]$parts)) -MaximumLength 48
     if ($safeLabel) { return $safeLabel }
     return 'cwd'
 }
@@ -373,7 +411,7 @@ function Get-GitDirectoryFromMarker {
         }
         $gitDirectory = [System.IO.Path]::GetFullPath($gitDirectory)
         $driveRoot = [System.IO.Path]::GetPathRoot($gitDirectory)
-        if ($driveRoot -notmatch '^[A-Za-z]:\\') { return $null }
+        if (-not (Test-HudLocalPath $gitDirectory)) { return $null }
         $gitAttributes = [System.IO.File]::GetAttributes($gitDirectory)
         if (($gitAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             return $null
@@ -395,7 +433,7 @@ function Get-GitDirectoryFromMarker {
 function Get-LocalGitContext {
     param([AllowNull()][string]$Path)
 
-    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^[A-Za-z]:[\\/]') {
+    if (-not (Test-HudLocalPath $Path)) {
         return $null
     }
 
@@ -483,11 +521,13 @@ function Get-GitSyncHash {
 
 function Get-GitDirectoryKey {
     param([string]$Path)
-    $normalized = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $normalized = [regex]::Replace($normalized, '[A-Z]', [Text.RegularExpressions.MatchEvaluator]{
-        param($match)
-        $match.Value.ToLowerInvariant()
-    })
+    $normalized = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ($script:IsWindowsPlatform) {
+        $normalized = [regex]::Replace($normalized, '[A-Z]', [Text.RegularExpressions.MatchEvaluator]{
+            param($match)
+            $match.Value.ToLowerInvariant()
+        })
+    }
     return (Get-GitSyncHash $normalized)
 }
 
@@ -504,11 +544,8 @@ function Write-GitSyncWarning {
 function Get-GitSyncSegment {
     param([AllowNull()][object]$GitContext)
     if ($null -eq $GitContext -or $GitContext.IsDetached) { return $null }
-    $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
-        $env:COPILOT_HOME
-    } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-        Join-Path $env:USERPROFILE '.copilot'
-    } else { return $null }
+    $copilotHome = Get-HudHome
+    if (-not $copilotHome) { return $null }
     $optionsPath = Join-Path $copilotHome 'hud-git-sync.json'
     if (-not [IO.File]::Exists($optionsPath)) { return $null }
     try {
@@ -729,13 +766,8 @@ function Get-TokenSegment {
 function Get-QuotaData {
     param([AllowNull()][object]$Payload)
 
-    $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
-        $env:COPILOT_HOME
-    } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-        Join-Path $env:USERPROFILE '.copilot'
-    } else {
-        return $null
-    }
+    $copilotHome = Get-HudHome
+    if (-not $copilotHome) { return $null }
     # Prefer our bridge's own capture; fall back to the marketplace copilot-hud file.
     $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $data = $null
@@ -1487,13 +1519,8 @@ function Get-SessionState {
         $sessionId = [string]$sessionId
         if ($sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$') { return $null }
 
-        $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
-            $env:COPILOT_HOME
-        } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-            Join-Path $env:USERPROFILE '.copilot'
-        } else {
-            return $null
-        }
+        $copilotHome = Get-HudHome
+        if (-not $copilotHome) { return $null }
         $statePath = Join-Path (Join-Path $copilotHome 'state') "hud-state-$sessionId.json"
         if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $null }
 
@@ -1526,15 +1553,12 @@ function Get-HudSignalState {
 
     $stream = $null
     try {
-        if ([Environment]::GetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE') -cne '1') {
-            return $null
-        }
+        $copilotHome = Get-HudHome
+        if (-not $copilotHome -or -not (Test-HudBridgeEnabled $copilotHome)) { return $null }
         $sessionId = Get-FirstValue -InputObject $Payload -Paths @('session_id')
-        $copilotHome = [Environment]::GetEnvironmentVariable('COPILOT_HOME')
         if ($sessionId -isnot [string] -or
             $sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$' -or
-            [string]::IsNullOrWhiteSpace($copilotHome) -or
-            $copilotHome -notmatch '^[A-Za-z]:[\\/]') {
+            -not (Test-HudLocalPath $copilotHome)) {
             return $null
         }
 
@@ -1722,13 +1746,8 @@ function Save-FirstStatuslinePayload {
             return
         }
 
-        $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
-            $env:COPILOT_HOME
-        } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-            Join-Path $env:USERPROFILE '.copilot'
-        } else {
-            return
-        }
+        $copilotHome = Get-HudHome
+        if (-not $copilotHome) { return }
         $stateDirectory = Join-Path $copilotHome 'state'
         [void][System.IO.Directory]::CreateDirectory($stateDirectory)
         $path = Join-Path $stateDirectory "raw-statusline-$sessionId.json"
@@ -1779,13 +1798,8 @@ function Get-SpinnerGlyph {
         $sessionId = [string]$sessionId
         if ($sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$') { return $fallback }
 
-        $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
-            $env:COPILOT_HOME
-        } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-            Join-Path $env:USERPROFILE '.copilot'
-        } else {
-            return $fallback
-        }
+        $copilotHome = Get-HudHome
+        if (-not $copilotHome) { return $fallback }
         $stateDirectory = Join-Path $copilotHome 'state'
         if (-not [System.IO.Directory]::Exists($stateDirectory)) { return $fallback }
         $framePath = Join-Path $stateDirectory "statusline-animation-$sessionId.frame"

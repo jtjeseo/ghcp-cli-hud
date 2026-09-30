@@ -2,26 +2,29 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $install = Join-Path $repo 'scripts\Install-Hud.ps1'
 $uninstall = Join-Path $repo 'scripts\Uninstall-Hud.ps1'
-$root = Join-Path $env:TEMP ('hud-install-fixture-' + [guid]::NewGuid().ToString('N'))
+$root = Join-Path ([IO.Path]::GetTempPath()) ('hud-install-fixture-' + [guid]::NewGuid().ToString('N'))
+$windows = [IO.Path]::DirectorySeparatorChar -eq '\'
+$wrapper = if ($windows) { 'statusline.cmd' } else { 'statusline.sh' }
 $h = Join-Path $root 'home'
 $results = [System.Collections.Generic.List[string]]::new()
 
 function Assert-Fixture([bool]$Condition, [string]$Message) { if (-not $Condition) { throw "FAIL: $Message" } }
 function Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 function Write-Text([string]$Path, [string]$Text) {
+    $Path = $Path.Replace('\', [IO.Path]::DirectorySeparatorChar)
     New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
     [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding $false))
 }
 
 try {
     Write-Text "$h\statusline\statusline.ps1" 'old renderer'
-    Write-Text "$h\statusline\statusline.cmd" 'old wrapper'
+    Write-Text "$h\statusline\$wrapper" 'old wrapper'
     Write-Text "$h\hooks\state-hook.ps1" 'old hook'
     Write-Text "$h\hooks\session-state-hooks.json" '{"hooks":{}}'
     Write-Text "$h\settings.json" '{"experimental":true,"custom":1}'
     Write-Text "$h\state\hud-state-other.json" '{"keep":true}'
     $before = @{}
-    foreach ($p in 'settings.json', 'hooks\session-state-hooks.json', 'statusline\statusline.cmd', 'state\hud-state-other.json') { $before[$p] = Hash "$h\$p" }
+    foreach ($p in @('settings.json', 'hooks\session-state-hooks.json', "statusline\$wrapper", 'state\hud-state-other.json')) { $before[$p] = Hash "$h\$p" }
     $oldRenderer = Hash "$h\statusline\statusline.ps1"
 
     $out = & $install -CopilotHome $h -IncludeBridge -EnableGitSync 2>&1 | Out-String
@@ -29,7 +32,8 @@ try {
     Assert-Fixture (Test-Path "$backup\manifest.json") 'manifest written'
     Assert-Fixture ((Hash "$h\statusline\statusline.ps1") -eq (Hash "$repo\statusline\statusline.ps1")) 'renderer installed'
     Assert-Fixture ((Hash "$h\hooks\state-hook.ps1") -eq (Hash "$repo\hooks\state-hook.ps1")) 'hook installed'
-    foreach ($n in 'extension.mjs', 'quota.mjs', 'git-sync.mjs', 'git-fetch.ps1', 'state-machine.mjs', 'state-store.mjs') {
+    foreach ($n in 'extension.mjs', 'configuration.mjs', 'quota.mjs', 'git-sync.mjs', 'git-fetch.ps1',
+        'git-fetch.sh', 'state-machine.mjs', 'state-store.mjs') {
         Assert-Fixture ((Hash "$h\extensions\hud-signal-bridge\$n") -eq (Hash "$repo\.github\extensions\hud-signal-bridge\$n")) "bridge $n installed"
     }
     Assert-Fixture ((Hash "$h\hud-git-sync.json") -eq (Hash "$repo\statusline\git-sync.json")) 'Git sync explicitly opted in'
@@ -38,11 +42,13 @@ try {
     Assert-Fixture ((Hash "$backup\statusline\statusline.ps1") -eq $oldRenderer) 'old renderer backed up'
     $results.Add('install: files installed and verified; settings, active hook config, wrapper and unrelated state unchanged; backup + manifest written')
 
-    $envUser = [Environment]::GetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE', 'User')
+    $envUser = if ($windows) { [Environment]::GetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE', 'User') } else { $null }
     $refused = $false
     try { & $install -CopilotHome $h -SetEnvironment 2>&1 | Out-Null } catch { $refused = $true }
     Assert-Fixture $refused '-SetEnvironment refused without -IncludeBridge / non-default home'
-    Assert-Fixture ([Environment]::GetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE', 'User') -eq $envUser) 'user environment untouched'
+    if ($windows) {
+        Assert-Fixture ([Environment]::GetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE', 'User') -eq $envUser) 'user environment untouched'
+    }
     $results.Add('environment: -SetEnvironment refused for a non-default home; user variables untouched')
 
     Write-Text "$h\extensions\hud-signal-bridge\extra.txt" 'x'

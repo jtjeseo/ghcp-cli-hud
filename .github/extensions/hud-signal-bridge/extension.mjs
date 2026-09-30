@@ -1,4 +1,5 @@
 import { joinSession } from "@github/copilot-sdk/extension";
+import { resolveBridgeConfiguration } from "./configuration.mjs";
 import { createQuotaWriter } from "./quota.mjs";
 import { createGitSyncUpdater } from "./git-sync.mjs";
 import { createSignalMachine } from "./state-machine.mjs";
@@ -10,7 +11,6 @@ import {
     isDisposableCopilotHome,
 } from "./state-store.mjs";
 
-const OPT_IN = "COPILOT_HUD_SIGNAL_BRIDGE";
 const DIAGNOSTICS_OPT_IN = "COPILOT_HUD_SIGNAL_DIAGNOSTICS";
 const AIC_VALIDATION_OPT_IN = "COPILOT_HUD_AIC_VALIDATION";
 const HEARTBEAT_MS = 5000;
@@ -68,9 +68,8 @@ function reportQuotaOnce(message) {
 }
 reportQuotaOnce.reported = false;
 
-async function startBridge() {
+async function startBridge(copilotHome) {
     const sessionId = safeSessionId(process.env.SESSION_ID);
-    const copilotHome = process.env.COPILOT_HOME;
     if (!sessionId || typeof copilotHome !== "string") {
         throw new Error("Isolated CLI session and COPILOT_HOME are required");
     }
@@ -354,13 +353,11 @@ async function attachIdle() {
     }
 }
 
-if (process.env[OPT_IN] === "1") {
-    try {
-        await startBridge();
-    } catch {
-        reportOnce("Initialization failed");
-        await attachIdle();
-    }
-} else {
+try {
+    const configuration = await resolveBridgeConfiguration(import.meta.url);
+    if (configuration.enabled) { await startBridge(configuration.home); }
+    else { await attachIdle(); }
+} catch {
+    reportOnce("Initialization failed");
     await attachIdle();
 }

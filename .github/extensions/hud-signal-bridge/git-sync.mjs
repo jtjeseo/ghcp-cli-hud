@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readdir, rename, rmdir, unlink } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readHudOptIn } from "./configuration.mjs";
 
 export const GIT_CHECK_MS = 15000;
 export const GIT_FETCH_MS = 300000;
@@ -61,15 +62,7 @@ async function writeJson(path, value) {
 }
 
 export async function gitSyncEnabled(home) {
-    try {
-        const options = await readJson(join(home, "hud-git-sync.json"), 256);
-        if (Object.keys(options).length !== 2 || options.version !== 1 ||
-            typeof options.enabled !== "boolean") { throw new Error("invalid-options"); }
-        return options.enabled;
-    } catch (error) {
-        if (error.code === "ENOENT") { return false; }
-        throw error;
-    }
+    return readHudOptIn(home, "hud-git-sync.json");
 }
 
 function gitEnvironment() {
@@ -84,7 +77,8 @@ function gitEnvironment() {
 
 export function runGitCommand(cwd, args) {
     return runProcess("git", [
-        "-C", cwd, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=NUL",
+        "-C", cwd, "-c", "core.fsmonitor=false", "-c",
+        `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
         "-c", "gc.auto=0", ...args,
     ], 5000);
 }
@@ -120,7 +114,11 @@ function runProcess(program, args, timeout) {
 }
 
 export async function runGitFetch({ root, remote, refspec, home, deadlineMs = Date.now() + 15000 }) {
-    const result = await runProcess("pwsh", [
+    const result = process.platform === "darwin" ? await runProcess("/bin/bash", [
+        fileURLToPath(new URL("./git-fetch.sh", import.meta.url)),
+        root, remote, refspec, join(home, "hud-git-sync.json"),
+        String(process.pid), String(deadlineMs),
+    ], 20000) : await runProcess("pwsh", [
         "-NoLogo", "-NoProfile", "-NonInteractive", "-File", fetchScript,
         "-Repository", root, "-Remote", remote, "-Refspec", refspec,
         "-OptionsPath", join(home, "hud-git-sync.json"),

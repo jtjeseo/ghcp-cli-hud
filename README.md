@@ -1,6 +1,59 @@
 # Copilot CLI HUD
 
-User-level Windows statusline and optional activity-tracking hooks for GitHub Copilot CLI.
+User-level statusline and optional activity-tracking hooks for GitHub Copilot CLI on Windows and macOS. Share this repository, not your `.copilot` folder: teammates keep their own sign-in, preferences, quota and session state.
+
+## Teammate quick start
+
+Clone this repository or download and extract its ZIP, then open a terminal in its root. Use your own existing Copilot CLI sign-in. Setup does not sign you in, change permissions, copy credentials, modify shell profiles, or install plugins.
+
+| Prerequisite | Windows | macOS |
+|---|---|---|
+| Copilot CLI | 1.0.89 or newer | 1.0.89 or newer |
+| PowerShell | PowerShell 7 (`pwsh`) on `PATH` | PowerShell 7 (`brew install --cask powershell`) |
+| Hook interpreter | Built-in Windows PowerShell 5.1 | Built-in Bash plus `jq` (`brew install jq`) |
+| Optional Git sync | Git 2.31+; Windows 10/Server 2016+ | Git 2.31+ and `jq` |
+
+**Windows** — from PowerShell:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Setup-Hud.ps1
+```
+
+`Bypass` applies only to this setup process, not your stored execution policy. Setup refuses restrictive organization policy and probes hooks without a process-policy override before activation. Review downloaded code before running it.
+
+If native Windows PowerShell cannot run the hooks under your current policy, setup stops before installing them. Use `-SkipHooks` for a bridge-only activity display rather than changing organization policy; it does not disable hooks that are already active.
+
+**macOS** — from Terminal:
+
+```bash
+pwsh -NoProfile -File ./scripts/Setup-Hud.ps1
+```
+
+**macOS native execution is not yet verified.** The implementation and native Windows/macOS CI matrix are included; Mac readiness requires a successful native runner and a live CLI restart check.
+
+Setup backs up touched files, preserves unrelated settings, configures the statusline, installs the optional experimental signal/quota bridge with a local opt-in, and enables absent hooks **only after silent fail-open probes pass**. It does not enable network fetching by default. It refuses to replace another statusline unless you choose `-ReplaceStatusLine`; an existing active hook configuration is kept, not automatically merged. Existing wrappers and enabled/disabled bridge/Git preferences are preserved.
+
+Restart Copilot CLI afterward. The bridge's quota cache fills after a model call; a blank quota segment initially is normal. Recent AIU needs a complete checkpoint interval. Agent counts depend on actual matching SDK lifecycle events and can legitimately be absent. A live restart is still needed to establish real hook firing and payload schemas; synthetic probes cannot establish those.
+
+Useful flags on either platform:
+
+| Flag | Effect |
+|---|---|
+| `-CheckOnly` | Check prerequisites without installing anything |
+| `-WhatIf` | Preview target/configuration changes without writing |
+| `-EnableGitSync` | Explicitly opt into periodic, non-interactive upstream fetching |
+| `-Basic` | Omit bridge installation; does not disable an already-installed bridge |
+| `-SkipHooks` | Do not activate absent hooks; keep an existing active configuration |
+| `-ReplaceStatusLine` | Explicitly replace another configured statusline |
+| `-CopilotHome <absolute path>` | Use a custom home; otherwise respect `COPILOT_HOME`, then the normal user home |
+
+**Update:** rerun the same setup command and restart CLI for bridge changes. Quota caches, daily accounting and session state are never copied from this checkout or reset. Use the most recent printed backup to undo that update; undo is per installation, not an untracked full wipe.
+
+**Undo:** close CLI and run the exact `Uninstall-Hud.ps1` command printed by setup. It restores prior files/settings, preserves later unrelated settings edits and runtime state, and retains handlers if you edited an installer-created active hook configuration. `-WhatIf` previews undo; `-Force` overrides changed-file protection and can discard later edits.
+
+**Disable only the bridge:** set `enabled` to `false` in `<CopilotHome>/hud-signal-bridge.json`, then restart CLI. Disable only fetching in `hud-git-sync.json`. A nonempty `COPILOT_HUD_SIGNAL_BRIDGE` environment override takes precedence (`1` enables; other values disable). User-installed extensions infer their installation home; project-discovered extensions still need explicit environment opt-in and home.
+
+**Hook recovery:** if hooks ever block tools, use an **external shell** to rename `<CopilotHome>/hooks/session-state-hooks.json` to `session-state-hooks.json.disabled`, then restart CLI. Do not try to recover through the blocked session.
 
 ## What it displays
 
@@ -44,36 +97,40 @@ The bridge uses the SDK's verified local-session working directory, not the exte
 
 The renderer **never runs Git or performs network calls**: branch discovery reads local Git metadata, and sync reads a bounded atomic cache. No upstream shows `no upstream`; an unborn branch shows `no commits`; detached HEAD shows `⎇ detached` without arrows. Missing state shows `sync pending`, becoming `sync unavailable` after an initialization grace period. Invalid state never implies synchronization. Failed fetches show `(fetch unavailable)` alongside any counts still computable from local refs. Cached count data older than one minute, or successful fetch information older than ten minutes, gets an age label; counts can be briefly behind local changes until the next background check.
 
-Fetches never pull, push, merge, checkout, stage, or modify the working tree. The helper disables Git hooks, automatic maintenance, tag fetching and submodule recursion, updates only the upstream remote-tracking ref, and does not rewrite `FETCH_HEAD`. Authentication is non-interactive; HTTPS credential helpers must already work unattended, and SSH uses OpenSSH batch mode. Fetch attempts have a 15-second deadline including helper startup, with up to one additional second for cleanup, and stop if the owning extension exits or the opt-in is disabled. Native descendants are contained in a Windows cleanup job from process creation; timeout or helper termination closes the whole job. Custom broker-activated helpers, such as Store-app activation, are outside that process tree and cannot be forcibly cleaned up by the job. A failure does not interrupt the CLI or renderer.
+Fetches never pull, push, merge, checkout, stage, or modify the working tree. The helper disables Git hooks, automatic maintenance, tag fetching and submodule recursion, updates only the upstream remote-tracking ref, and does not rewrite `FETCH_HEAD`. Authentication is non-interactive; HTTPS credential helpers must already work unattended, and SSH uses OpenSSH batch mode. Fetch attempts have a 15-second deadline including helper startup, with up to one additional second for cleanup, and stop if the owning extension exits or the opt-in is disabled. Windows native descendants are contained in a cleanup job from process creation; timeout or helper termination closes the whole job. The macOS helper uses a dedicated process group with bounded TERM/KILL cleanup; native verification is pending. Custom broker-activated or process-group-escaping helpers are outside ordinary descendant containment. A failure does not interrupt the CLI or renderer.
 
 Derived records live under `state\hud-git-sync`, each at most 4 KiB. Repository/worktree, branch and upstream identities are hashed; raw paths, remote URLs, hostnames, account identifiers and Git error text are not stored or displayed. Up to 32 obsolete records/temporary files are removed per update; records older than seven days or beyond the newest 128 are eligible. Warnings use fixed categories; renderer storage errors write only `state-unavailable` to `state\hud-git-sync-warning.log`. Fixtures: `tests\hud-git-sync.test.mjs` and `tests\statusline-git-fixtures.ps1`.
 
 ## Files
 
 - `statusline\statusline.cmd`: Windows wrapper; launches the PowerShell renderer.
+- `statusline\statusline.sh`: macOS wrapper for the same PowerShell renderer; neither wrapper requires executable file bits.
 - `statusline\statusline.ps1`: renderer. Branch lookup is filesystem-only; Git is needed by the optional background sync updater.
 - `statusline\git-sync.json`: installer template for the separate Git-sync opt-in.
+- `statusline\signal-bridge.json`: installer template for the local bridge opt-in.
+- `scripts\Setup-Hud.ps1`: portable prerequisite checks, backed-up settings integration and safe hook activation.
+- `scripts\Install-Hud.ps1` and `scripts\Uninstall-Hud.ps1`: explicit installation options and manifest-based rollback.
 - `hooks\state-hook.ps1` and `hooks\state-hook.sh`: fail-open per-session activity tracking. PowerShell hook failures remain silent to the CLI and write only a fixed, bounded marker to `state\hud-hook-failure.log` when possible.
 - `hooks\session-state-hooks.json`: user hook event configuration for tool, session, error, and subagent activity.
 - `.github\extensions\hud-signal-bridge`: experimental project-scoped signal bridge. It is inert unless explicitly opted in.
 - `tests\hud-signal-reliability.test.mjs`, `tests\hud-signal-state-machine.test.mjs`, `tests\hud-signal-state-store.test.mjs`, `tests\hud-git-sync.test.mjs`, `tests\state-hook-powershell51-fixtures.ps1`, `tests\hud-aic-validation-inspector.ps1`, and `tests\statusline-*-fixtures.ps1`: local synthetic fixtures; none launches Copilot.
 
-The hook configuration uses per-user paths and can be installed under another Windows user's profile. Runtime state is created locally under `.copilot\state`; do not copy state from another machine.
+The hook configuration uses per-user paths on Windows and macOS. Runtime state is created locally under the selected home's `state` directory; do not copy state from another machine.
 
 ## Requirements
 
-- GitHub Copilot CLI with the hook events used by this configuration. This setup was validated with CLI 1.0.88; verify event support before enabling hooks on other versions.
-- Experimental project extensions must be enabled for the process with `copilot --experimental`.
-- PowerShell 7 (`pwsh`) on `PATH` for the Windows statusline wrapper. The PowerShell hook handler supports Windows PowerShell 5.1 and PowerShell 7.
-- Bash and `jq` are needed only if the CLI invokes the Bash hook handler.
+- GitHub Copilot CLI 1.0.89 or newer for teammate setup. The earlier hook configuration was validated against 1.0.88; real firing on a new installation still needs a restart.
+- Full setup enables `"experimental": true` in settings for the bridge; project-only development can use `copilot --experimental`.
+- PowerShell 7 (`pwsh`) on `PATH` for either statusline wrapper. The Windows hook handler supports Windows PowerShell 5.1 and PowerShell 7.
+- Bash and `jq` are needed for macOS hooks; `jq` is also required for macOS Git sync.
 - Node.js is needed to run the local bridge fixtures. The CLI supplies the SDK when it runs a project extension.
 - Git 2.31 or newer on `PATH` is needed only for Git synchronization; PowerShell 7 runs its bounded fetch helper on Windows 10 / Windows Server 2016 or newer.
 
 ## Opt-in signal prototype
 
-Checking out this repository does not automatically install the bridge under `%USERPROFILE%\.copilot\extensions` or alter hook or statusline settings. The bridge runs when discovered as a project extension or installed user-wide as described below, and only when `COPILOT_HUD_SIGNAL_BRIDGE=1` is set. It also requires an explicitly set `COPILOT_HOME`; the extension will not fall back to the normal user home.
+Checking out this repository does not automatically install the bridge or alter hook or statusline settings. A user-installed bridge can infer its home and uses `hud-signal-bridge.json` when there is no nonempty `COPILOT_HUD_SIGNAL_BRIDGE` override. Project discovery alone never enables it: a project extension still requires `COPILOT_HUD_SIGNAL_BRIDGE=1` and an explicitly set absolute `COPILOT_HOME`.
 
-The renderer reads the bridge file only when the same opt-in variable is `1`, the session ID matches, and the bounded state is valid and fresh. The file is written under `%COPILOT_HOME%\state\hud-signal-bridge\hud-signal-<sessionId>.json`, atomically replaced, limited to 4 KiB, and contains only its version, session ID, timestamps, a neutral phase, the most recent checkpoint difference or an allowlisted suppression code, and an optional active-subagent count capped at 16. Agent and tool-call IDs are held in memory only. Attached state is heartbeated every 5 seconds, including idle periods without a recent value, and ignored if more than 20 seconds stale. The assistant-turn-complete phase lasts 10 seconds; a recent difference or suppression reason lasts 2 minutes, then becomes `recent —` without hiding the segment or fabricating activity. Freshness timestamps never move backward. The CLI stops the extension on exit or replaces it when the foreground session changes; if the observer stops or writes continue failing, the old snapshot becomes stale and the renderer uses matching-session hook activity. A write failure resets attribution in memory before a subsequent heartbeat can retry. A lifecycle-confirmed positive agent count is demoted to unknown after 5 minutes without a matching terminal; a confirmed zero is kept authoritative for 5 minutes, then becomes unknown. Hook activity entries also expire after 5 minutes. The directory retains at most 64 state files and prunes files older than 24 hours at extension startup. On Windows it inherits the `COPILOT_HOME` directory ACL; restrictive Unix mode bits are requested where supported. By default, no event logs, prompts, responses, intent/progress text, tool names, arguments/results, transcripts, or per-call usage are written; the separate disposable diagnostic below writes only bounded count-change summaries. The renderer performs no network or GitHub/API calls.
+The renderer reads the bridge file only when the local preference or environment override enables it, the session ID matches, and the bounded state is valid and fresh. The file is written under `%COPILOT_HOME%\state\hud-signal-bridge\hud-signal-<sessionId>.json`, atomically replaced, limited to 4 KiB, and contains only its version, session ID, timestamps, a neutral phase, the most recent checkpoint difference or an allowlisted suppression code, and an optional active-subagent count capped at 16. Agent and tool-call IDs are held in memory only. Attached state is heartbeated every 5 seconds, including idle periods without a recent value, and ignored if more than 20 seconds stale. The assistant-turn-complete phase lasts 10 seconds; a recent difference or suppression reason lasts 2 minutes, then becomes `recent —` without hiding the segment or fabricating activity. Freshness timestamps never move backward. The CLI stops the extension on exit or replaces it when the foreground session changes; if the observer stops or writes continue failing, the old snapshot becomes stale and the renderer uses matching-session hook activity. A write failure resets attribution in memory before a subsequent heartbeat can retry. A lifecycle-confirmed positive agent count is demoted to unknown after 5 minutes without a matching terminal; a confirmed zero is kept authoritative for 5 minutes, then becomes unknown. Hook activity entries also expire after 5 minutes. The directory retains at most 64 state files and prunes files older than 24 hours at extension startup. On Windows it inherits the `COPILOT_HOME` directory ACL; restrictive Unix mode bits are requested where supported. By default, no event logs, prompts, responses, intent/progress text, tool names, arguments/results, transcripts, or per-call usage are written; the separate disposable diagnostic below writes only bounded count-change summaries. The renderer performs no network or GitHub/API calls.
 
 The AIC difference is computed only from a valid prior numeric checkpoint followed by idle, a non-overlapping interval of sequential root-turn starts/ends, a later numeric checkpoint, and a subsequent `session.idle`. Sequential internal turns in the same busy interval are grouped without using `turnId` as an identity. Parallel root tools are allowed when distinct call IDs have matching starts and completions entirely inside an open root turn; concurrency alone is not an attribution overlap. The phase remains `Running tool` until the last active call completes. Tools crossing a root-turn boundary, unfinished calls, duplicate starts or unmatched progress/completions remain ambiguous. Per-call usage is ignored. The first complete interval after startup establishes a baseline and shows no difference. Missing or out-of-order boundaries, overlapping root turns, interruption, resume/context clear, counter decrease, malformed state, or any unverified subagent event suppresses the value. Explicit subagent attribution on a tool event also suppresses usage even without a lifecycle event; subagent suppression lasts until a session resume or context clear resets the machine. Missing root event IDs, malformed checkpoints, permission boundaries, and tool-call correlation failures suppress AIC attribution without clearing otherwise matched subagent identities. The display label is `recent +… AIU`; it does not claim a unique prompt or turn cost.
 
@@ -81,9 +138,9 @@ The bridge phase labels are `◐ Working`, `◐ Running tool`, and a brief `✓ 
 
 ## Default install for every session
 
-Scope: your own Windows user profile only, for ordinary `copilot` launches. Nothing is installed in application repositories.
+Use **Teammate quick start** above for Windows or macOS. The following lower-level/manual path remains for existing Windows installations. Nothing is installed in application repositories.
 
-**Scripted install (recommended).** From the repo root in Windows PowerShell 5.1 or pwsh:
+**Legacy file-only install.** From the repo root in Windows PowerShell 5.1 or pwsh:
 
 ```powershell
 .\scripts\Install-Hud.ps1 -WhatIf                          # preview
@@ -91,19 +148,19 @@ Scope: your own Windows user profile only, for ordinary `copilot` launches. Noth
 .\scripts\Install-Hud.ps1 -IncludeBridge -EnableGitSync    # separately opt in an existing bridge to background fetch
 .\scripts\Uninstall-Hud.ps1 -BackupPath <backup folder printed by the installer> -RestoreEnvironment
 ```
-The installer backs up every file it touches to `.copilot\backups\hud-install-<stamp>` with a SHA-256 manifest, verifies each copy, never rewrites `settings.json` or an existing `session-state-hooks.json` (it prints the `statusLine` snippet if missing, and installs an absent hook config only as `.disabled`), and leaves an existing `statusline.cmd` alone. Rollback restores files by hash, removes files the installer created, and keeps any file you edited afterward unless `-Force`. Existing quota caches, the fixed daily baseline and shared accounting state are not overwritten by installation or rollback. Then restart Copilot from a new Windows Terminal tab. The manual steps follow.
+With these legacy flags, the installer backs up every file it touches to `.copilot\backups\hud-install-<stamp>` with a SHA-256 manifest, verifies each copy, never rewrites `settings.json` or an existing `session-state-hooks.json` (it prints the `statusLine` snippet if missing, and installs an absent hook config only as `.disabled`), and leaves an existing `statusline.cmd` alone. Rollback restores files by hash, removes files the installer created, and keeps any file you edited afterward unless `-Force`. Existing quota caches, the fixed daily baseline and shared accounting state are not overwritten by installation or rollback. Then restart Copilot from a new Windows Terminal tab. The manual steps follow.
 
 1. **Renderer and hooks** — follow "Windows installation" or "Updating an existing installation". This alone gives the muted default HUD; when bridge state is absent, stale, or invalid the HUD falls back to hook-derived activity.
-2. **Bridge (optional, experimental)** — GitHub documents `%USERPROFILE%\.copilot\extensions\<name>\extension.mjs` as loading in all sessions when `"experimental": true` is set in `settings.json`. Copy all five modules (`extension.mjs`, `quota.mjs`, `git-sync.mjs`, `state-machine.mjs`, and `state-store.mjs`) plus `git-fetch.ps1` from `.github\extensions\hud-signal-bridge` into `%USERPROFILE%\.copilot\extensions\hud-signal-bridge`, then set two user environment variables (new terminals only):
+2. **Bridge (optional, experimental)** — GitHub documents `%USERPROFILE%\.copilot\extensions\<name>\extension.mjs` as loading in all sessions when `"experimental": true` is set in `settings.json`. Copy all six modules (`extension.mjs`, `configuration.mjs`, `quota.mjs`, `git-sync.mjs`, `state-machine.mjs`, and `state-store.mjs`) plus `git-fetch.ps1` and `git-fetch.sh` from `.github\extensions\hud-signal-bridge` into `%USERPROFILE%\.copilot\extensions\hud-signal-bridge`, then set two user environment variables (new terminals only):
 
    ```powershell
    [Environment]::SetEnvironmentVariable('COPILOT_HUD_SIGNAL_BRIDGE', '1', 'User')
    [Environment]::SetEnvironmentVariable('COPILOT_HOME', "$env:USERPROFILE\.copilot", 'User')
    ```
 
-   The bridge needs an explicit `COPILOT_HOME`; the value above is the CLI's default location. Diagnostics, raw capture, and AIC validation stay off unless their own variables are set (leave them unset). Without the opt-in variable, or if it cannot start, the extension attaches idle with no listeners, so `/env` shows it Running instead of timing out, and it writes nothing. Normal bridge output is one bounded activity snapshot per session plus the shared `hud-quota.json` cache under `.copilot\state\hud-signal-bridge`. Git-sync caches and fetches require the additional opt-in described above.
+   This legacy path uses an explicit `COPILOT_HOME`; the value above is the CLI's default location. Diagnostics, raw capture, and AIC validation stay off unless their own variables are set (leave them unset). With neither an environment opt-in nor an enabled local preference, the extension attaches idle with no listeners, so `/env` shows it Running instead of timing out, and it writes nothing. Normal bridge output is one bounded activity snapshot per session plus the shared `hud-quota.json` cache under `.copilot\state\hud-signal-bridge`. Git-sync caches and fetches require the additional opt-in described above.
 3. **Verify** in a new terminal: run `copilot`, check `/env` shows `hud-signal-bridge` Running (from your user extensions, not Project), and confirm line 2 keeps the muted `I/O/C` and `+/-` colors. After a reply, the HUD may show `recent +… AIU` (an interval increase, never a prompt price) and `✓ Assistant turn complete`; agent counts appear only while subagents run.
-4. **Rollback** — close Copilot CLI, delete `%USERPROFILE%\.copilot\extensions\hud-signal-bridge`, clear both variables with `SetEnvironmentVariable(name, $null, 'User')`, and restore backed-up renderer/hook files. The bridge can be disabled alone by clearing `COPILOT_HUD_SIGNAL_BRIDGE`.
+4. **Rollback** — close Copilot CLI, delete `%USERPROFILE%\.copilot\extensions\hud-signal-bridge`, clear both variables with `SetEnvironmentVariable(name, $null, 'User')`, and restore backed-up renderer/hook files. For this environment-only legacy path, clearing `COPILOT_HUD_SIGNAL_BRIDGE` disables the bridge; if you also ran teammate setup, disable its local preference as described above.
 
 Already-running sessions and terminals opened before the variables were set keep their old environment; restart them. Extensions are experimental and run with your privileges; keep only trusted code there.
 
@@ -165,19 +222,28 @@ The observer inherits the exact `COPILOT_HOME` from this launcher invocation; it
 
 ## Local synthetic checks
 
-Run the local synthetic checks from the repository root:
+Run the portable synthetic checks from the repository root in PowerShell 7 (the same relative paths work on both platforms):
 
 ```powershell
-node --test .\tests\hud-git-sync.test.mjs .\tests\hud-quota.test.mjs .\tests\hud-signal-reliability.test.mjs .\tests\hud-signal-state-machine.test.mjs .\tests\hud-signal-state-store.test.mjs .\tests\hud-signal-state-store-rename-failure.test.mjs
-powershell.exe -NoProfile -File .\tests\hud-launcher-environment.ps1
-powershell.exe -NoProfile -File .\tests\hud-aic-validation-inspector.ps1
-powershell.exe -NoProfile -File .\tests\state-hook-powershell51-fixtures.ps1
+$files = @((Get-ChildItem -LiteralPath .\tests -Filter '*.test.mjs').FullName)
+node --test @files
 pwsh -NoProfile -File .\tests\statusline-signal-fixtures.ps1
 pwsh -NoProfile -File .\tests\statusline-git-fixtures.ps1
 pwsh -NoProfile -File .\tests\statusline-quota-fixtures.ps1
 pwsh -NoProfile -File .\tests\statusline-quota-shared-fixtures.ps1
 pwsh -NoProfile -File .\tests\hud-install-scripts.ps1
+pwsh -NoProfile -File .\tests\hud-setup-fixtures.ps1
 ```
+
+Windows-only compatibility checks:
+
+```powershell
+powershell.exe -NoProfile -File .\tests\hud-launcher-environment.ps1
+powershell.exe -NoProfile -File .\tests\hud-aic-validation-inspector.ps1
+powershell.exe -NoProfile -File .\tests\state-hook-powershell51-fixtures.ps1
+```
+
+`.github/workflows/hud-checks.yml` runs these on native Windows and macOS runners without authenticated CLI sessions or user-state artifacts. Setup fixtures use a version-only CLI stub, disposable homes and actual installed renderer commands; they check config-only bridge activation, quoted paths, hook probes, settings preservation, refusal/replacement and surgical rollback.
 
 These fixtures cover checkpoint/idle grouping, valid AIC arithmetic, multiple internal turns, missing baselines, counter resets, interruption, resume, overlap, unverified subagent attribution, recent-value expiry, AIU rounding, the two-stage baseline/check observer gate (including grouped-turn rejection, fresh-record enforcement, matching baseline B, and null-value mismatch), one-record validation retention, Windows PowerShell 5.1 hook payload/state conversion and cleanup, unrelated-session preservation, fail-open sanitized hook errors, 2→1→0 matched terminals, a five-minute missing-terminal lease, confirmed-zero expiry, sanitized reason records for every active-count transition category, diagnostic retention and session isolation, parent-tool completion before agent completion, stale/absent/malformed state, matching-session-only hook fallback, terminal labels that do not imply success, rendering widths, ANSI/`NO_COLOR`, and Fleet-count precedence alongside hook tools/history without duplicate agent claims. Reliability regressions include clean parallel root tools, tools crossing root-turn boundaries, idle heartbeats, and explicit subagent attribution. Quota fixtures cover cached thresholds and age labels, concurrent cross-terminal totals, durable inboxes, high-water deduplication, conservative reconciliation, delayed checkpoint rejection, legacy migration, bounded cleanup, and visible partial accounting after contention or corruption. Installer fixtures cover backups, hash verification, preserved settings/state, and rollback. They do not enable the extension or launch a live CLI session; fixture success does not replace a live HUD check.
 

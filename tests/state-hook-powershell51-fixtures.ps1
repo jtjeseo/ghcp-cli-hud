@@ -114,6 +114,13 @@ try {
         ConvertTo-Json -InputObject $sessionStart -Compress
     )
     Assert-HookSucceeded $result
+    if (-not [System.IO.File]::Exists($statePath)) {
+        $marker = if ([System.IO.File]::Exists($failurePath)) {
+            [System.IO.File]::ReadAllText($failurePath).Trim()
+        } else { 'absent' }
+        'SessionStartDiagnostic=failureMarker={0};stateFiles={1}' -f $marker,
+            @(Get-ChildItem -LiteralPath $stateDirectory -Filter 'hud-state-*' -File).Count
+    }
     Assert-Fixture ([System.IO.File]::Exists($statePath)) `
         'sessionStart did not create hook state.'
 
