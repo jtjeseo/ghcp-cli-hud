@@ -2,6 +2,8 @@
 
 User-level statusline and optional activity-tracking hooks for GitHub Copilot CLI on Windows and macOS. Share this repository, not your `.copilot` folder: teammates keep their own sign-in, preferences, quota and session state.
 
+**Windows-first pilot:** intended for a small teammate rollout, not a fully verified cross-platform release. macOS support is implemented but remains provisional.
+
 ## Teammate quick start
 
 Clone this repository or download and extract its ZIP, then open a terminal in its root. Use your own existing Copilot CLI sign-in. Setup does not sign you in, change permissions, copy credentials, modify shell profiles, or install plugins.
@@ -30,6 +32,10 @@ pwsh -NoProfile -File ./scripts/Setup-Hud.ps1
 ```
 
 **macOS native execution is not yet verified.** The implementation and native Windows/macOS CI matrix are included; Mac readiness requires a successful native runner and a live CLI restart check.
+
+**Known Windows verification caveat:** the existing Windows PowerShell 5.1 session-start fixture intermittently missed telemetry in two local runs. Later standalone and sequential compatibility runs passed, but the cause is not established. The hook subprocesses exited silently with code 0 rather than blocking tools; the fixture correctly failed because missing activity data is not proof of a successful hook write. A successful teammate installation and live restart are still needed before calling the handoff dependable.
+
+The first native CI attempt was blocked before either runner started by a GitHub billing/spending-limit restriction. No native runner results are claimed; local Git Bash checks do not substitute for native macOS verification.
 
 Setup backs up touched files, preserves unrelated settings, configures the statusline, installs the optional experimental signal/quota bridge with a local opt-in, and enables absent hooks **only after silent fail-open probes pass**. It does not enable network fetching by default. It refuses to replace another statusline unless you choose `-ReplaceStatusLine`; an existing active hook configuration is kept, not automatically merged. Existing wrappers and enabled/disabled bridge/Git preferences are preserved.
 
@@ -244,6 +250,16 @@ powershell.exe -NoProfile -File .\tests\state-hook-powershell51-fixtures.ps1
 ```
 
 `.github/workflows/hud-checks.yml` runs these on native Windows and macOS runners without authenticated CLI sessions or user-state artifacts. Setup fixtures use a version-only CLI stub, disposable homes and actual installed renderer commands; they check config-only bridge activation, quoted paths, hook probes, settings preservation, refusal/replacement and surgical rollback.
+
+**Local Bash checks:** from the repository root in Git Bash (Windows) or Terminal (macOS):
+
+```bash
+bash ./tests/hud-bash-fixtures.sh
+```
+
+The suite needs `git`, `jq` and `pwsh`, and uses only disposable directories and local repositories. It exercises all Bash hook events, silent fail-open handling for valid/malformed/empty/unexpected input, locked state, missing jq, session cleanup isolation, the renderer wrapper at 80/120/160 columns, a real local fetch without changing HEAD/index/worktree/FETCH_HEAD, strict fetch options, and timeout/disable/owner-exit cleanup of a simulated shell transport and child.
+
+Git Bash uses test-only adapters for Windows-native jq binary output and Windows path conversion, including names with spaces/apostrophes; production scripts are unchanged. A GNU-stat-backed shim exercises the BSD-stat fallback where GNU stat is installed. These are useful Bash logic checks, **not native macOS certification**: Git Bash is Bash/MSYS on Windows, not macOS's Bash 3.2, filesystem, PowerShell runtime, SDK environment or native Git process tree. CI's Mac step explicitly uses `/bin/bash`; a native Mac run and live CLI restart are still required.
 
 These fixtures cover checkpoint/idle grouping, valid AIC arithmetic, multiple internal turns, missing baselines, counter resets, interruption, resume, overlap, unverified subagent attribution, recent-value expiry, AIU rounding, the two-stage baseline/check observer gate (including grouped-turn rejection, fresh-record enforcement, matching baseline B, and null-value mismatch), one-record validation retention, Windows PowerShell 5.1 hook payload/state conversion and cleanup, unrelated-session preservation, fail-open sanitized hook errors, 2→1→0 matched terminals, a five-minute missing-terminal lease, confirmed-zero expiry, sanitized reason records for every active-count transition category, diagnostic retention and session isolation, parent-tool completion before agent completion, stale/absent/malformed state, matching-session-only hook fallback, terminal labels that do not imply success, rendering widths, ANSI/`NO_COLOR`, and Fleet-count precedence alongside hook tools/history without duplicate agent claims. Reliability regressions include clean parallel root tools, tools crossing root-turn boundaries, idle heartbeats, and explicit subagent attribution. Quota fixtures cover cached thresholds and age labels, concurrent cross-terminal totals, durable inboxes, high-water deduplication, conservative reconciliation, delayed checkpoint rejection, legacy migration, bounded cleanup, and visible partial accounting after contention or corruption. Installer fixtures cover backups, hash verification, preserved settings/state, and rollback. They do not enable the extension or launch a live CLI session; fixture success does not replace a live HUD check.
 

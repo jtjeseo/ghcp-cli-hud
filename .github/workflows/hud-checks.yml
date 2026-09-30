@@ -49,3 +49,7 @@ jobs:
             & powershell.exe -NoProfile -File (Join-Path .\tests ($name + '.ps1'))
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      - name: Native macOS Bash fixtures
+        if: runner.os == 'macOS'
+        shell: bash
+        run: /bin/bash ./tests/hud-bash-fixtures.sh
