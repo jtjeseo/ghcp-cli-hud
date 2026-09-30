@@ -609,6 +609,21 @@ try {
             "Fleet precedence changed HUD lines 1/2 at width $mixedWidth."
         Assert-Fixture ((Get-VisibleLength $fleetWithActiveToolLines[2]) -le $mixedWidth) `
             "Mixed Fleet activity exceeded width $mixedWidth."
+        foreach ($fleetState in @($mixedFleetState, $unknownFleetState)) {
+            $coloredActivity = Invoke-StatuslineFixture -Width $mixedWidth -NoColor $false `
+                -HookState $agentAndToolHook -SignalState $fleetState
+            $coloredLines = @(Get-OutputLines $coloredActivity)
+            $yellowGlyphs = [regex]::Matches($coloredLines[2], "`e\[38;5;226m◐`e\[0m")
+            Assert-Fixture ($yellowGlyphs.Count -eq 2) `
+                "Both tool and agent glyphs must be yellow regardless of telemetry source at width $mixedWidth."
+            Assert-Fixture ($coloredLines[2] -match "`e\[38;5;15mpowershell`e\[0m" -and
+                $coloredLines[2] -match "`e\[38;5;15m(?:analysis|2 subagents)`e\[0m") `
+                'Active tool and agent labels must stay white.'
+            Assert-Fixture ((Get-VisibleLength $coloredLines[2]) -le $mixedWidth) `
+                "Color styling changed activity width at $mixedWidth."
+        }
+        Assert-Fixture ($fleetWithActiveTool -notmatch "`e" -and $hookBaseline -notmatch "`e") `
+            'NO_COLOR active tool/agent output contained ANSI escapes.'
     }
 
     $agentDispatchHook = Get-FixtureHookState -WithActiveTool $false -Now $now
@@ -1019,6 +1034,7 @@ console.log(JSON.stringify({
     Test-AtomicSignalSnapshots
     'StatuslineSignalFixturesPass=True'
     'Widths=80,120,160; ANSI/NO_COLOR=passed'
+    'ActiveGlyphs=yellow-for-bridge-and-hook-tools/agents; labels=white; NO_COLOR=unchanged'
     'RecentPlaceholder=fresh-bridge-only; UnknownOutcome=neutral-ended'
     'RecentReliability=parallel-tools:+6.00-AIU; idle/expired-value/expired-reason:neutral-placeholder; Widths=80,120,160'
     'FleetCounts=1/2,confirmed-zero,unknown,5-minute hook lease,matching-session fallback,concurrent-session isolation'

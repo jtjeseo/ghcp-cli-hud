@@ -1731,17 +1731,24 @@ function Get-HudSignalState {
     }
 }
 
+function Format-RunningGlyph {
+    param([string]$Glyph = '◐')
+
+    if ([string]::IsNullOrEmpty($Glyph) -or $Glyph.Length -ne 1) { $Glyph = '◐' }
+    return $script:Bright + $script:Colors.yellow + $Glyph + $script:Reset
+}
+
 function Get-HudPhaseSegment {
     param([AllowNull()][object]$SignalState)
 
     if ($SignalState -isnot [System.Collections.IDictionary]) { return $null }
     switch ([string]$SignalState['phase']) {
         'working' {
-            $glyph = $script:Bright + $script:Colors.yellow + '◐' + $script:Reset
+            $glyph = Format-RunningGlyph
             $label = 'Working'
         }
         'running_tool' {
-            $glyph = $script:Bright + $script:Colors.yellow + '◐' + $script:Reset
+            $glyph = Format-RunningGlyph
             $label = 'Running tool'
         }
         'complete' {
@@ -1763,7 +1770,7 @@ function Get-HudSubagentSegment {
         return $null
     }
     $label = if ($count -eq 1) { '1 subagent' } else { "$([long]$count) subagents" }
-    $glyph = $script:Bright + $script:Colors.yellow + '◐' + $script:Reset
+    $glyph = Format-RunningGlyph
     return $glyph + ' ' + $script:Bright + $script:Colors.white + $label + $script:Reset
 }
 
@@ -2004,7 +2011,7 @@ function Get-ActivitySegment {
                 ''
             }
             $runningText = $script:Dim + ' running' + $script:Reset
-            $glyph = $script:Bright + $script:Colors.cyan + '◐' + $script:Reset
+            $glyph = Format-RunningGlyph
             return $script:Dim + 'activity' + $script:Reset + ' ' + $glyph + ' ' +
                 $script:Bright + $script:Colors.white + $first.name + $script:Reset + ' -> ' +
                 $script:Dim + $first.target + $script:Reset + $elapsedText +
@@ -2080,7 +2087,7 @@ function Get-AgentSegment {
                 ''
             }
             $runningText = $script:Dim + ' running' + $script:Reset
-            $glyph = $script:Bright + $script:Colors.cyan + '◐' + $script:Reset
+            $glyph = Format-RunningGlyph
             return $glyph + ' ' + $agentLabel + $agentName + $repeatText + $elapsedText + $runningText
         }
 
@@ -2204,6 +2211,7 @@ function Get-CompactActivitySegment {
         }
 
         $items = [System.Collections.Generic.List[object]]::new()
+        $runningGlyph = Format-RunningGlyph $SpinnerGlyph
         foreach ($group in @($activeGroups | Select-Object -First $MaximumItems)) {
             $labelText = $script:Bright + $script:Colors.white + $group.label + $script:Reset
             $repeatText = if ($group.count -gt 1) { " x$($group.count)" } else { '' }
@@ -2223,9 +2231,9 @@ function Get-CompactActivitySegment {
             }
             [void]$items.Add([pscustomobject]@{
                 kind = 'activeTool'
-                text = $SpinnerGlyph + ' ' + $labelText + $targetText + $repeatText + $elapsedText
-                compactText = $SpinnerGlyph + ' ' + $labelText + $repeatText + $elapsedText
-                minimalText = $SpinnerGlyph + ' ' + $labelText + $repeatText
+                text = $runningGlyph + ' ' + $labelText + $targetText + $repeatText + $elapsedText
+                compactText = $runningGlyph + ' ' + $labelText + $repeatText + $elapsedText
+                minimalText = $runningGlyph + ' ' + $labelText + $repeatText
             })
         }
 
@@ -2432,7 +2440,7 @@ function Get-CompactAgentSegment {
                     (Format-Duration ([math]::Max(0, $now - $startedAt))) + $script:Reset
             }
             $repeatText = if ($activeAgents.Count -gt 1) { " x$($activeAgents.Count)" } else { '' }
-            $glyph = if ($SpinnerGlyph.Length -eq 1) { $SpinnerGlyph } else { '◐' }
+            $glyph = Format-RunningGlyph $SpinnerGlyph
             return $glyph + ' ' + $script:Bright + $script:Colors.white +
                 $label + $script:Reset + $repeatText + $elapsedText
         }
