@@ -1,5 +1,6 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { createQuotaWriter } from "./quota.mjs";
+import { createGitSyncUpdater } from "./git-sync.mjs";
 import { createSignalMachine } from "./state-machine.mjs";
 import {
     createAicValidationStore,
@@ -132,6 +133,31 @@ async function startBridge() {
         recordSubagentTransitions: diagnosticStore !== null,
         recordAicValidation: aicValidationStore !== null,
         bridgeSessionMatched: aicValidationStore !== null,
+    });
+    const gitSync = createGitSyncUpdater({
+        home: copilotHome,
+        onWarning: (category) => console.error(
+            `[hud-signal-bridge] Git ${category}; cached sync information may be unavailable.`
+        ),
+    });
+    let gitContextRevision = 0;
+    let gitPendingDirectory = null;
+    let gitLocalSessionConfirmed = false;
+    gitSync.start();
+    process.once("exit", () => gitSync.stop());
+    const initialGitContextRevision = gitContextRevision;
+    void (async () => {
+        const metadata = await session.rpc.metadata.snapshot();
+        if (safeSessionId(metadata.sessionId) !== sessionId || metadata.isRemote !== false) {
+            gitSync.stop();
+            return;
+        }
+        gitLocalSessionConfirmed = true;
+        gitSync.setWorkingDirectory(gitContextRevision === initialGitContextRevision
+            ? metadata.workingDirectory : gitPendingDirectory);
+    })().catch(() => {
+        gitSync.stop();
+        console.error("[hud-signal-bridge] Git working directory unavailable; sync cache may be unavailable.");
     });
     let pendingSnapshot = null;
     let writeTask = null;
@@ -268,6 +294,12 @@ async function startBridge() {
     }
 
     session.on((event) => {
+        if (event.type === "session.context_changed" && event.agentId == null &&
+            event.data?.pendingGitContext !== true) {
+            gitContextRevision += 1;
+            gitPendingDirectory = event.data?.cwd;
+            if (gitLocalSessionConfirmed) { gitSync.setWorkingDirectory(gitPendingDirectory); }
+        }
         if (quotaWriter !== null) {
             try {
                 quotaWriter(event);

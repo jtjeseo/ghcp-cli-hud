@@ -10,12 +10,15 @@ Target home. Defaults to %USERPROFILE%\.copilot.
 Also copy the experimental hud-signal-bridge extension into <home>\extensions.
 .PARAMETER SetEnvironment
 With -IncludeBridge, set the user variables COPILOT_HUD_SIGNAL_BRIDGE=1 and COPILOT_HOME. Only allowed for the default home.
+.PARAMETER EnableGitSync
+With -IncludeBridge, install the separate background-fetch opt-in. Existing options are preserved.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$CopilotHome = (Join-Path $env:USERPROFILE '.copilot'),
     [switch]$IncludeBridge,
-    [switch]$SetEnvironment
+    [switch]$SetEnvironment,
+    [switch]$EnableGitSync
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -23,6 +26,7 @@ $defaultHome = Join-Path $env:USERPROFILE '.copilot'
 $isDefaultHome = ([IO.Path]::GetFullPath($CopilotHome).TrimEnd('\') -ieq [IO.Path]::GetFullPath($defaultHome).TrimEnd('\'))
 
 if ($SetEnvironment -and -not $IncludeBridge) { throw '-SetEnvironment requires -IncludeBridge.' }
+if ($EnableGitSync -and -not $IncludeBridge) { throw '-EnableGitSync requires -IncludeBridge.' }
 if ($SetEnvironment -and -not $isDefaultHome) { throw '-SetEnvironment is only allowed for the default Copilot home.' }
 
 $bridgeSource = Join-Path $repo '.github\extensions\hud-signal-bridge'
@@ -36,8 +40,11 @@ Add-Target (Join-Path $repo 'hooks\state-hook.ps1') 'hooks\state-hook.ps1'
 Add-Target (Join-Path $repo 'hooks\state-hook.sh') 'hooks\state-hook.sh'
 Add-Target (Join-Path $repo 'hooks\session-state-hooks.json') 'hooks\session-state-hooks.json.disabled' -OnlyIfMissing
 if ($IncludeBridge) {
-    foreach ($name in 'extension.mjs', 'quota.mjs', 'state-machine.mjs', 'state-store.mjs') {
+    foreach ($name in 'extension.mjs', 'quota.mjs', 'git-sync.mjs', 'git-fetch.ps1', 'state-machine.mjs', 'state-store.mjs') {
         Add-Target (Join-Path $bridgeSource $name) "extensions\hud-signal-bridge\$name"
+    }
+    if ($EnableGitSync) {
+        Add-Target (Join-Path $repo 'statusline\git-sync.json') 'hud-git-sync.json' -OnlyIfMissing
     }
 }
 

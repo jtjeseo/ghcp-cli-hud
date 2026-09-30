@@ -47,6 +47,8 @@ if (Test-Path -LiteralPath $projectHooksDirectory -PathType Container) {
 $requiredFiles = @(
     (Join-Path $extensionDirectory 'hud-signal-bridge\extension.mjs'),
     (Join-Path $extensionDirectory 'hud-signal-bridge\quota.mjs'),
+    (Join-Path $extensionDirectory 'hud-signal-bridge\git-sync.mjs'),
+    (Join-Path $extensionDirectory 'hud-signal-bridge\git-fetch.ps1'),
     (Join-Path $extensionDirectory 'hud-signal-bridge\state-machine.mjs'),
     (Join-Path $extensionDirectory 'hud-signal-bridge\state-store.mjs'),
     (Join-Path $repoRoot 'statusline\statusline.cmd'),

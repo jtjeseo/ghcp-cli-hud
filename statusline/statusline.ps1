@@ -392,7 +392,7 @@ function Get-GitDirectoryFromMarker {
     }
 }
 
-function Get-LocalGitBranch {
+function Get-LocalGitContext {
     param([AllowNull()][string]$Path)
 
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^[A-Za-z]:[\\/]') {
@@ -439,7 +439,9 @@ function Get-LocalGitBranch {
                 if ($head -match '^ref:\s+refs/heads/(.+)$') {
                     $branch = $Matches[1]
                 } elseif ($head -match '^(?:[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$') {
-                    return 'detached'
+                    return [pscustomobject]@{
+                        Branch = 'detached'; GitDirectory = $gitDirectory; IsDetached = $true
+                    }
                 } else {
                     return $null
                 }
@@ -450,7 +452,9 @@ function Get-LocalGitBranch {
                     $branch -match '^[A-Fa-f0-9-]{32,}$') {
                     return $null
                 }
-                return $branch
+                return [pscustomobject]@{
+                    Branch = $branch; GitDirectory = $gitDirectory; IsDetached = $false
+                }
             }
             $directory = $directory.Parent
         }
@@ -460,13 +464,142 @@ function Get-LocalGitBranch {
     return $null
 }
 
+function Get-LocalGitBranch {
+    param([AllowNull()][string]$Path)
+    $context = Get-LocalGitContext -Path $Path
+    if ($null -ne $context) { return $context.Branch }
+    return $null
+}
+
+function Get-GitSyncHash {
+    param([string]$Value)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($hash.ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes($Value)
+        )).Replace('-', '').ToLowerInvariant()
+    } finally { $hash.Dispose() }
+}
+
+function Get-GitDirectoryKey {
+    param([string]$Path)
+    $normalized = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $normalized = [regex]::Replace($normalized, '[A-Z]', [Text.RegularExpressions.MatchEvaluator]{
+        param($match)
+        $match.Value.ToLowerInvariant()
+    })
+    return (Get-GitSyncHash $normalized)
+}
+
+function Write-GitSyncWarning {
+    param([string]$CopilotHome)
+    try {
+        [IO.File]::WriteAllText(
+            (Join-Path (Join-Path $CopilotHome 'state') 'hud-git-sync-warning.log'),
+            'state-unavailable'
+        )
+    } catch {}
+}
+
+function Get-GitSyncSegment {
+    param([AllowNull()][object]$GitContext)
+    if ($null -eq $GitContext -or $GitContext.IsDetached) { return $null }
+    $copilotHome = if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
+        $env:COPILOT_HOME
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        Join-Path $env:USERPROFILE '.copilot'
+    } else { return $null }
+    $optionsPath = Join-Path $copilotHome 'hud-git-sync.json'
+    if (-not [IO.File]::Exists($optionsPath)) { return $null }
+    try {
+        $options = Read-QuotaEstimateRecord -Path $optionsPath -MaxBytes 256
+        if ($options -isnot [Collections.IDictionary] -or $options.Count -ne 2 -or
+            -not $options.Contains('version') -or -not $options.Contains('enabled') -or
+            -not (Test-HudSignalInteger $options.version) -or $options.version -ne 1 -or
+            $options.enabled -isnot [bool]) { throw 'Invalid Git sync options' }
+        if (-not $options.enabled) { return $null }
+        $key = Get-GitDirectoryKey $GitContext.GitDirectory
+        $path = Join-Path (Join-Path (Join-Path $copilotHome 'state') 'hud-git-sync') "hud-git-$key.json"
+        if (-not [IO.File]::Exists($path)) {
+            $age = ([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($optionsPath)).TotalSeconds
+            $label = if ($age -gt 60) { 'sync unavailable' } else { 'sync pending' }
+            return $script:Dim + $label + $script:Reset
+        }
+        $data = Read-QuotaEstimateRecord -Path $path -MaxBytes 4096
+        $keys = @('version', 'repositoryKey', 'branchKey', 'updatedAt', 'status',
+            'ahead', 'behind', 'fetchedAt', 'fetchStatus')
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        if ($data -isnot [Collections.IDictionary] -or $data.Count -ne $keys.Count -or
+            @($keys | Where-Object { -not $data.Contains($_) }).Count -gt 0 -or
+            -not (Test-HudSignalInteger $data.version) -or $data.version -ne 1 -or
+            $data.repositoryKey -isnot [string] -or $data.repositoryKey -cnotmatch '^[a-f0-9]{64}$' -or
+            $data.branchKey -isnot [string] -or $data.branchKey -cnotmatch '^[a-f0-9]{64}$' -or
+            -not (Test-HudSignalInteger $data.updatedAt) -or $data.updatedAt -gt $now + 5000 -or
+            $data.status -cnotin @('ok', 'no-upstream', 'unborn', 'detached', 'unavailable') -or
+            $data.fetchStatus -cnotin @('ok', 'local', 'pending', 'unavailable', 'not-needed') -or
+            ($null -ne $data.fetchedAt -and
+                (-not (Test-HudSignalInteger $data.fetchedAt) -or
+                    $data.fetchedAt -gt $data.updatedAt + 5000)) -or
+            ($data.status -ceq 'ok' -and
+                (-not (Test-HudSignalInteger $data.ahead) -or -not (Test-HudSignalInteger $data.behind))) -or
+            ($data.status -cne 'ok' -and ($null -ne $data.ahead -or $null -ne $data.behind))) {
+            throw 'Invalid Git sync snapshot'
+        }
+        if ($data.repositoryKey -cne $key -or
+            $data.branchKey -cne (Get-GitSyncHash $GitContext.Branch) -or
+            $data.status -ceq 'detached') {
+            return $script:Dim + 'sync pending' + $script:Reset
+        }
+        $parts = [Collections.Generic.List[string]]::new()
+        if ($data.status -ceq 'ok') {
+            $diverged = $data.ahead -gt 0 -and $data.behind -gt 0
+            if ($data.behind -gt 0) {
+                $color = if ($diverged) { $script:Bright + $script:Colors.yellow } else { $script:Colors.cyan }
+                $parts.Add($color + '↓' + (Format-Count $data.behind) + $script:Reset)
+            }
+            if ($data.ahead -gt 0) {
+                $parts.Add($script:Colors.yellow + '↑' + (Format-Count $data.ahead) + $script:Reset)
+            }
+            if ($data.fetchStatus -ceq 'unavailable') {
+                $parts.Add($script:Dim + '(fetch unavailable)' + $script:Reset)
+            } elseif ($data.fetchStatus -ceq 'pending') {
+                $parts.Add($script:Dim + '(fetch pending)' + $script:Reset)
+            }
+        } else {
+            $label = switch -CaseSensitive ($data.status) {
+                'no-upstream' { 'no upstream' }
+                'unborn' { 'no commits' }
+                default { 'sync unavailable' }
+            }
+            $parts.Add($script:Dim + $label + $script:Reset)
+        }
+        $dataAge = [math]::Max(0.0, $now - [double]$data.updatedAt)
+        $fetchAge = if ($null -ne $data.fetchedAt) {
+            [math]::Max(0.0, $now - [double]$data.fetchedAt)
+        } else { 0.0 }
+        $age = if ($dataAge -gt 60000) { [math]::Max($dataAge, $fetchAge) }
+            elseif ($fetchAge -gt 600000) { $fetchAge } else { 0.0 }
+        if ($age -gt 0) {
+            $minutes = [math]::Floor($age / 60000)
+            $text = if ($minutes -lt 60) { "${minutes}m" } else { "$([math]::Floor($minutes / 60))h" }
+            $parts.Add($script:Dim + "($text ago)" + $script:Reset)
+        }
+        if ($parts.Count -gt 0) { return [string]::Join(' ', $parts) }
+        return $null
+    } catch {
+        Write-GitSyncWarning -CopilotHome $copilotHome
+        return $script:Dim + 'sync unavailable' + $script:Reset
+    }
+}
+
 function Get-BranchSegment {
-    param([object]$Payload)
+    param([object]$Payload, [AllowNull()][object]$GitContext)
 
     # Resolve only from the statusline payload cwd, never the process working directory.
     $cwd = Get-FirstValue -InputObject $Payload -Paths @('cwd')
     if ($cwd -isnot [string]) { return $null }
-    $branch = Get-LocalGitBranch -Path $cwd
+    if ($null -eq $GitContext) { $GitContext = Get-LocalGitContext -Path $cwd }
+    $branch = if ($null -ne $GitContext) { $GitContext.Branch } else { $null }
     if (-not $branch) { return $null }
     $displayBranch = $branch
     if ($displayBranch.Length -gt $script:BranchDisplayWidth) {
@@ -475,7 +608,8 @@ function Get-BranchSegment {
             $script:BranchDisplayWidth - 3
         ) + '...'
     }
-    return $script:Colors.yellow + $displayBranch + $script:Reset
+    return $script:Dim + '⎇' + $script:Reset + ' ' +
+        $script:Colors.yellow + $displayBranch + $script:Reset
 }
 
 function Format-ContextInputCount {
@@ -2376,6 +2510,16 @@ function Remove-OverflowSegments {
         $removed = $false
         for ($index = $Segments.Count - 1; $index -ge 0; $index--) {
             $segment = $Segments[$index]
+            if ($segment.Key -ceq 'branch-sync' -and
+                $overflowLines.Contains([string]$segment.Line)) {
+                $Segments.RemoveAt($index)
+                $removed = $true
+                break
+            }
+        }
+        if ($removed) { continue }
+        for ($index = $Segments.Count - 1; $index -ge 0; $index--) {
+            $segment = $Segments[$index]
             if ($segment.Key -ceq 'branch' -and
                 $overflowLines.Contains([string]$segment.Line)) {
                 $Segments.RemoveAt($index)
@@ -2550,12 +2694,18 @@ if ($activeAgentSlots -eq 0 -and $activeToolGroups.Count -eq 0) {
 
 $quotaData = try { Get-QuotaData -Payload $payload } catch { $null }
 $quotaSegment = Invoke-StatusSegment { Get-QuotaSegment $quotaData }
+$gitContext = try { Get-LocalGitContext -Path ([string]$payload.cwd) } catch { $null }
 $segments = [System.Collections.Generic.List[object]]::new()
 
 foreach ($segment in @(
     [pscustomobject]@{
         Key = 'branch'; Group = 'branch'; Line = 'location'
-        Value = (Invoke-StatusSegment { Get-BranchSegment $payload })
+        Value = (Invoke-StatusSegment { Get-BranchSegment -Payload $payload -GitContext $gitContext })
+    },
+    [pscustomobject]@{
+        Key = 'branch-sync'; Group = 'branch'; Line = 'location'
+        SeparatorBefore = ' '
+        Value = (Invoke-StatusSegment { Get-GitSyncSegment -GitContext $gitContext })
     },
     [pscustomobject]@{
         Key = 'ctx'; Group = 'context'; Line = 'location'

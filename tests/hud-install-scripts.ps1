@@ -24,14 +24,15 @@ try {
     foreach ($p in 'settings.json', 'hooks\session-state-hooks.json', 'statusline\statusline.cmd', 'state\hud-state-other.json') { $before[$p] = Hash "$h\$p" }
     $oldRenderer = Hash "$h\statusline\statusline.ps1"
 
-    $out = & $install -CopilotHome $h -IncludeBridge 2>&1 | Out-String
+    $out = & $install -CopilotHome $h -IncludeBridge -EnableGitSync 2>&1 | Out-String
     $backup = ([regex]::Match($out, 'Backup: (.+)')).Groups[1].Value.Trim()
     Assert-Fixture (Test-Path "$backup\manifest.json") 'manifest written'
     Assert-Fixture ((Hash "$h\statusline\statusline.ps1") -eq (Hash "$repo\statusline\statusline.ps1")) 'renderer installed'
     Assert-Fixture ((Hash "$h\hooks\state-hook.ps1") -eq (Hash "$repo\hooks\state-hook.ps1")) 'hook installed'
-    foreach ($n in 'extension.mjs', 'quota.mjs', 'state-machine.mjs', 'state-store.mjs') {
+    foreach ($n in 'extension.mjs', 'quota.mjs', 'git-sync.mjs', 'git-fetch.ps1', 'state-machine.mjs', 'state-store.mjs') {
         Assert-Fixture ((Hash "$h\extensions\hud-signal-bridge\$n") -eq (Hash "$repo\.github\extensions\hud-signal-bridge\$n")) "bridge $n installed"
     }
+    Assert-Fixture ((Hash "$h\hud-git-sync.json") -eq (Hash "$repo\statusline\git-sync.json")) 'Git sync explicitly opted in'
     foreach ($p in $before.Keys) { Assert-Fixture ((Hash "$h\$p") -eq $before[$p]) "$p unchanged" }
     Assert-Fixture (-not (Test-Path "$h\hooks\session-state-hooks.json.disabled")) 'no .disabled copy when hook config is active'
     Assert-Fixture ((Hash "$backup\statusline\statusline.ps1") -eq $oldRenderer) 'old renderer backed up'
@@ -61,16 +62,29 @@ try {
     $u2 = & $uninstall -BackupPath $backup 2>&1 | Out-String
     Assert-Fixture ((Hash "$h\statusline\statusline.ps1") -eq $oldRenderer) 'old renderer restored'
     Assert-Fixture (-not (Test-Path "$h\extensions\hud-signal-bridge")) 'bridge files removed'
+    Assert-Fixture (-not (Test-Path "$h\hud-git-sync.json")) 'installer-created Git opt-in removed on rollback'
     Assert-Fixture (-not (Test-Path "$h\hooks\state-hook.sh") -or (Hash "$h\hooks\state-hook.sh") -ne (Hash "$repo\hooks\state-hook.sh")) 'created hook.sh removed'
     Assert-Fixture ((Get-Content "$h\hooks\state-hook.ps1" -Raw) -eq 'old hook') 'old hook restored'
     foreach ($p in $before.Keys) { Assert-Fixture ((Hash "$h\$p") -eq $before[$p]) "$p preserved after rollback" }
     $results.Add('rollback: previous files restored by hash, installer-created files removed, unrelated files preserved')
+
+    Write-Text "$h\hud-git-sync.json" '{"version":1,"enabled":false}'
+    $optionsBefore = Hash "$h\hud-git-sync.json"
+    Start-Sleep -Seconds 1
+    $optIn = & $install -CopilotHome $h -IncludeBridge -EnableGitSync 2>&1 | Out-String
+    Assert-Fixture ((Hash "$h\hud-git-sync.json") -ceq $optionsBefore) 'existing Git opt-in preferences overwritten'
+    $optInBackup = ([regex]::Match($optIn, 'Backup: (.+)')).Groups[1].Value.Trim()
+    & $uninstall -BackupPath $optInBackup | Out-Null
+    Assert-Fixture ((Hash "$h\hud-git-sync.json") -ceq $optionsBefore) 'rollback removed existing Git opt-in preferences'
+    Remove-Item -LiteralPath "$h\hud-git-sync.json"
+    $results.Add('git-sync: explicit opt-in installed; existing preferences preserved; created opt-in rolled back')
 
     Remove-Item "$h\hooks\session-state-hooks.json" -Force
     $out3 = & $install -CopilotHome $h 2>&1 | Out-String
     Assert-Fixture (Test-Path "$h\hooks\session-state-hooks.json.disabled") 'hook config installed disabled when absent'
     Assert-Fixture (-not (Test-Path "$h\hooks\session-state-hooks.json")) 'hook config not auto-enabled'
     Assert-Fixture (-not (Test-Path "$h\extensions\hud-signal-bridge")) 'bridge not installed without -IncludeBridge'
+    Assert-Fixture (-not (Test-Path "$h\hud-git-sync.json")) 'Git sync not implicitly enabled'
     $results.Add('defaults: absent hook config installed as .disabled only; bridge only with -IncludeBridge')
 
     'HudInstallScriptsPass=True'
