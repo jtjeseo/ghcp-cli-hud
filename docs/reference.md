@@ -17,6 +17,10 @@ Clone this repository or download and extract its ZIP, then open a terminal in i
 | Hook interpreter | Built-in Windows PowerShell 5.1 | Built-in Bash plus `jq` (`brew install jq`) |
 | Optional Git sync | Git 2.31+; Windows 10/Server 2016+ | Git 2.31+ and `jq` |
 
+**Windows terminal host:** [Install Windows Terminal](https://learn.microsoft.com/en-us/windows/terminal/install) for the recommended Unicode/color display, then open **Windows Terminal** from Start. PowerShell and Command Prompt are shells; launching either directly can still open the classic Windows console host. Installing PowerShell 7 does not install Windows Terminal. The classic console can show missing icons or limited HUD colors even with Consolas, UTF-8 code page 65001, and legacy console mode turned off.
+
+In Windows Terminal, select the Windows PowerShell profile or PowerShell 7 if installed. Windows Terminal is recommended for display fidelity, not a new runtime prerequisite: Windows PowerShell 5.1 remains supported. These instructions do not require changing organization policy or editing terminal settings files.
+
 **Windows** — from PowerShell:
 
 Windows PowerShell 5.1 supports setup, rendering, hooks, rollback, diagnostics and bounded background fetching. PowerShell 7 is optional; the renderer wrapper uses it when available and otherwise falls back to the built-in Windows engine.

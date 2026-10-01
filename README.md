@@ -15,6 +15,8 @@ Clone this repository or extract its ZIP, then open a terminal in its root. Use 
 | Hooks | Built-in Windows PowerShell 5.1 | Bash and `jq` (`brew install jq`) |
 | Optional Git sync | Git 2.31+; Windows 10/Server 2016+ | Git 2.31+ and `jq` |
 
+**Windows display:** [Windows Terminal](https://learn.microsoft.com/en-us/windows/terminal/install) is recommended for Unicode icons and colors. It is a separate app, not PowerShell: installing PowerShell 7 does not install it. Open **Windows Terminal** from Start and choose Windows PowerShell or PowerShell 7 from its profile menu. Classic Command Prompt/PowerShell windows may show missing glyphs or limited colors.
+
 **Windows**, from PowerShell:
 
 ```powershell
